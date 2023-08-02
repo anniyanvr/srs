@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_STATISTIC_HPP
 #define SRS_APP_STATISTIC_HPP
@@ -29,6 +12,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <sstream>
 
 #include <srs_kernel_codec.hpp>
 #include <srs_rtmp_stack.hpp>
@@ -118,6 +102,10 @@ public:
     std::string id;
     srs_utime_t create;
 public:
+    // The stream total kbps.
+    SrsKbps* kbps;
+    SrsWallClock* clk;
+public:
     SrsStatisticClient();
     virtual ~SrsStatisticClient();
 public:
@@ -129,7 +117,7 @@ class SrsStatistic
 private:
     static SrsStatistic *_instance;
     // The id to identify the sever.
-    std::string _server_id;
+    std::string server_id_;
 private:
     // The key: vhost id, value: vhost object.
     std::map<std::string, SrsStatisticVhost*> vhosts;
@@ -186,6 +174,10 @@ public:
     //      only got the request object, so the client specified by id maybe not
     //      exists in stat.
     virtual void on_disconnect(std::string id);
+private:
+    // Cleanup the stream if stream is not active and for the last client.
+    void cleanup_stream(SrsStatisticStream* stream);
+public:
     // Sample the kbps, add delta bytes of conn.
     // Use kbps_sample() to get all result of kbps stat.
     virtual void kbps_add_delta(std::string id, ISrsKbpsDelta* delta);
@@ -199,14 +191,21 @@ public:
     // Dumps the vhosts to amf0 array.
     virtual srs_error_t dumps_vhosts(SrsJsonArray* arr);
     // Dumps the streams to amf0 array.
-    virtual srs_error_t dumps_streams(SrsJsonArray* arr);
+    // @param start the start index, from 0.
+    // @param count the max count of streams to dump.
+    virtual srs_error_t dumps_streams(SrsJsonArray* arr, int start, int count);
     // Dumps the clients to amf0 array
     // @param start the start index, from 0.
     // @param count the max count of clients to dump.
     virtual srs_error_t dumps_clients(SrsJsonArray* arr, int start, int count);
+    // Dumps the hints about SRS server.
+    void dumps_hints_kv(std::stringstream & ss);
 private:
     virtual SrsStatisticVhost* create_vhost(SrsRequest* req);
     virtual SrsStatisticStream* create_stream(SrsStatisticVhost* vhost, SrsRequest* req);
 };
+
+// Generate a random string id, with constant prefix.
+extern std::string srs_generate_stat_vid();
 
 #endif

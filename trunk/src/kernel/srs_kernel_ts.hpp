@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * The Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * The Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * The SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_KERNEL_TS_HPP
 #define SRS_KERNEL_TS_HPP
@@ -114,7 +97,7 @@ enum SrsTsPidApply
     SrsTsPidApplyAudio, // vor audio
 };
 
-// Table 2-29 - Stream type assignments
+// Table 2-29 - Stream type assignments, hls-mpeg-ts-iso13818-1.pdf, page 66
 enum SrsTsStream
 {
     // ITU-T | ISO/IEC Reserved
@@ -123,8 +106,8 @@ enum SrsTsStream
     // ISO/IEC 11172 Video
     // ITU-T Rec. H.262 | ISO/IEC 13818-2 Video or ISO/IEC 11172-2 constrained parameter video stream
     // ISO/IEC 11172 Audio
+    SrsTsStreamAudioMp3 = 0x03,
     // ISO/IEC 13818-3 Audio
-    SrsTsStreamAudioMp3 = 0x04,
     // ITU-T Rec. H.222.0 | ISO/IEC 13818-1 private_sections
     // ITU-T Rec. H.222.0 | ISO/IEC 13818-1 PES packets containing private data
     // ISO/IEC 13522 MHEG
@@ -1260,7 +1243,7 @@ private:
     // User must config the codec in right way.
     // @see https://github.com/ossrs/srs/issues/301
     SrsVideoCodecId vcodec;
-    SrsAudioCodecId acodec;
+    SrsAudioCodecId acodec_;
 private:
     SrsTsContext* context;
     ISrsStreamWriter* writer;
@@ -1276,6 +1259,10 @@ public:
 public:
     // get the video codec of ts muxer.
     virtual SrsVideoCodecId video_codec();
+public:
+    // Get and set the audio codec.
+    SrsAudioCodecId acodec();
+    void set_acodec(SrsAudioCodecId v);
 };
 
 // Used for HLS Encryption

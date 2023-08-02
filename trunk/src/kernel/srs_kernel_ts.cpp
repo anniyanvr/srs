@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_kernel_ts.hpp>
 
@@ -2615,8 +2598,8 @@ SrsTsContextWriter::SrsTsContextWriter(ISrsStreamWriter* w, SrsTsContext* c, Srs
 {
     writer = w;
     context = c;
-    
-    acodec = ac;
+
+    acodec_ = ac;
     vcodec = vc;
 }
 
@@ -2631,7 +2614,7 @@ srs_error_t SrsTsContextWriter::write_audio(SrsTsMessage* audio)
     srs_info("hls: write audio pts=%" PRId64 ", dts=%" PRId64 ", size=%d",
         audio->pts, audio->dts, audio->PES_packet_length);
     
-    if ((err = context->encode(writer, audio, vcodec, acodec)) != srs_success) {
+    if ((err = context->encode(writer, audio, vcodec, acodec_)) != srs_success) {
         return srs_error_wrap(err, "ts: write audio");
     }
     srs_info("hls encode audio ok");
@@ -2646,7 +2629,7 @@ srs_error_t SrsTsContextWriter::write_video(SrsTsMessage* video)
     srs_info("hls: write video pts=%" PRId64 ", dts=%" PRId64 ", size=%d",
         video->pts, video->dts, video->PES_packet_length);
     
-    if ((err = context->encode(writer, video, vcodec, acodec)) != srs_success) {
+    if ((err = context->encode(writer, video, vcodec, acodec_)) != srs_success) {
         return srs_error_wrap(err, "ts: write video");
     }
     srs_info("hls encode video ok");
@@ -2657,6 +2640,16 @@ srs_error_t SrsTsContextWriter::write_video(SrsTsMessage* video)
 SrsVideoCodecId SrsTsContextWriter::video_codec()
 {
     return vcodec;
+}
+
+SrsAudioCodecId SrsTsContextWriter::acodec()
+{
+    return acodec_;
+}
+
+void SrsTsContextWriter::set_acodec(SrsAudioCodecId v)
+{
+    acodec_ = v;
 }
 
 SrsEncFileWriter::SrsEncFileWriter()
@@ -3081,7 +3074,11 @@ srs_error_t SrsTsTransmuxer::write_audio(int64_t timestamp, char* data, int size
     if ((err = format->on_audio(timestamp, data, size)) != srs_success) {
         return srs_error_wrap(err, "ts: format on audio");
     }
-    
+
+    if (!format->acodec) {
+        return err;
+    }
+
     // ts support audio codec: aac/mp3
     srs_assert(format->acodec && format->audio);
     if (format->acodec->id != SrsAudioCodecIdAAC && format->acodec->id != SrsAudioCodecIdMP3) {
@@ -3091,6 +3088,13 @@ srs_error_t SrsTsTransmuxer::write_audio(int64_t timestamp, char* data, int size
     // for aac: ignore sequence header
     if (format->acodec->id == SrsAudioCodecIdAAC && format->audio->aac_packet_type == SrsAudioAacFrameTraitSequenceHeader) {
         return err;
+    }
+
+    // Switch audio codec if not AAC.
+    if (tscw->acodec() != format->acodec->id) {
+        srs_trace("TS: Switch audio codec %d(%s) to %d(%s)", tscw->acodec(), srs_audio_codec_id2str(tscw->acodec()).c_str(),
+            format->acodec->id, srs_audio_codec_id2str(format->acodec->id).c_str());
+        tscw->set_acodec(format->acodec->id);
     }
     
     // the dts calc from rtmp/flv header.
@@ -3117,7 +3121,11 @@ srs_error_t SrsTsTransmuxer::write_video(int64_t timestamp, char* data, int size
     if ((err = format->on_video(timestamp, data, size)) != srs_success) {
         return srs_error_wrap(err, "ts: on video");
     }
-    
+
+    if (!format->vcodec) {
+        return err;
+    }
+
     // ignore info frame,
     // @see https://github.com/ossrs/srs/issues/288#issuecomment-69863909
     srs_assert(format->video && format->vcodec);

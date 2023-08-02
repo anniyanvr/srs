@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2020 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_threads.hpp>
 
@@ -32,6 +15,7 @@
 #include <srs_app_pithy_print.hpp>
 #include <srs_app_rtc_server.hpp>
 #include <srs_app_log.hpp>
+#include <srs_app_async_call.hpp>
 
 #ifdef SRS_RTC
 #include <srs_app_rtc_dtls.hpp>
@@ -285,6 +269,7 @@ srs_error_t SrsCircuitBreaker::on_timer(srs_utime_t interval)
 }
 
 SrsCircuitBreaker* _srs_circuit_breaker = NULL;
+SrsAsyncCallWorker* _srs_dvr_async = NULL;
 
 srs_error_t srs_thread_initialize()
 {
@@ -424,6 +409,12 @@ srs_error_t srs_thread_initialize()
     _srs_pps_objs_rbuf = new SrsPps();
     _srs_pps_objs_rothers = new SrsPps();
 #endif
+
+    // Create global async worker for DVR.
+    _srs_dvr_async = new SrsAsyncCallWorker();
+    if ((err = _srs_dvr_async->start()) != srs_success) {
+        return srs_error_wrap(err, "dvr async");
+    }
 
     return err;
 }

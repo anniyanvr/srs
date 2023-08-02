@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_service_http_client.hpp>
 
@@ -71,7 +54,7 @@ SrsSslClient::~SrsSslClient()
     }
 }
 
-srs_error_t SrsSslClient::handshake()
+srs_error_t SrsSslClient::handshake(const std::string& host)
 {
     srs_error_t err = srs_success;
 
@@ -103,6 +86,10 @@ srs_error_t SrsSslClient::handshake()
     // SSL setup active, as client role.
     SSL_set_connect_state(ssl);
     SSL_set_mode(ssl, SSL_MODE_ENABLE_PARTIAL_WRITE);
+    // If the server address is not in IP address format, set the host in the Server Name Indication (SNI) field.
+    if (!srs_check_ip_addr_valid(host)) {
+        SSL_set_tlsext_host_name(ssl, host.c_str());
+    }
 
     // Send ClientHello.
     int r0 = SSL_do_handshake(ssl); int r1 = SSL_get_error(ssl, r0);
@@ -339,6 +326,10 @@ srs_error_t SrsHttpClient::post(string path, string req, ISrsHttpMessage** ppmsg
         return srs_error_wrap(err, "http: connect server");
     }
     
+    if (path.size() == 0) {
+        path = "/";
+    }
+
     // send POST request to uri
     // POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n%s
     std::stringstream ss;
@@ -478,7 +469,7 @@ srs_error_t SrsHttpClient::connect()
 
     srs_utime_t starttime = srs_update_system_time();
 
-    if ((err = ssl_transport->handshake()) != srs_success) {
+    if ((err = ssl_transport->handshake(host)) != srs_success) {
         disconnect();
         return srs_error_wrap(err, "http: ssl connect %s %s:%d to=%dms, rto=%dms",
             schema_.c_str(), host.c_str(), port, srsu2msi(timeout), srsu2msi(recv_timeout));

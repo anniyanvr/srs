@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 John
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 John
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_RTC_SERVER_HPP
 #define SRS_APP_RTC_SERVER_HPP
@@ -32,6 +15,7 @@
 #include <srs_app_hourglass.hpp>
 #include <srs_app_hybrid.hpp>
 #include <srs_app_rtc_sdp.hpp>
+#include <srs_app_async_call.hpp>
 
 #include <string>
 
@@ -42,6 +26,7 @@ class SrsRequest;
 class SrsSdp;
 class SrsRtcSource;
 class SrsResourceManager;
+class SrsWaitGroup;
 
 // The UDP black hole, for developer to use wireshark to catch plaintext packets.
 // For example, server receive UDP packets at udp://8000, and forward the plaintext packet to black hole,
@@ -90,15 +75,25 @@ class SrsRtcUserConfig
 {
 public:
     // Original variables from API.
+    std::string remote_sdp_str_;
     SrsSdp remote_sdp_;
     std::string eip_;
     std::string codec_;
+    std::string api_;
+
+    // Session data.
+    std::string local_sdp_str_;
+    std::string session_id_;
 
     // Generated data.
     SrsRequest* req_;
     bool publish_;
     bool dtls_;
     bool srtp_;
+
+    // The order of audio and video, or whether audio is before video. Please make sure the order is match for offer and
+    // answer, or client might fail at setRemoveDescription(answer). See https://github.com/ossrs/srs/issues/3179
+    bool audio_before_video_;
 public:
     SrsRtcUserConfig();
     virtual ~SrsRtcUserConfig();
@@ -111,6 +106,7 @@ private:
     std::vector<SrsUdpMuxListener*> listeners;
     ISrsRtcServerHandler* handler;
     ISrsRtcServerHijacker* hijacker;
+    SrsAsyncCallWorker* async;
 public:
     SrsRtcServer();
     virtual ~SrsRtcServer();
@@ -123,6 +119,7 @@ public:
     // Set the handler for server events.
     void set_handler(ISrsRtcServerHandler* h);
     void set_hijacker(ISrsRtcServerHijacker* h);
+    srs_error_t exec_async_work(ISrsAsyncCallTask* t);
 public:
     // TODO: FIXME: Support gracefully quit.
     // TODO: FIXME: Support reload.
@@ -151,7 +148,7 @@ public:
     virtual ~RtcServerAdapter();
 public:
     virtual srs_error_t initialize();
-    virtual srs_error_t run();
+    virtual srs_error_t run(SrsWaitGroup* wg);
     virtual void stop();
 };
 

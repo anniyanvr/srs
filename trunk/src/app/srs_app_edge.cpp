@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_edge.hpp>
 
@@ -83,7 +66,6 @@ srs_error_t SrsEdgeRtmpUpstream::connect(SrsRequest* r, SrsLbRoundRobin* lb)
     if (true) {
         SrsConfDirective* conf = _srs_config->get_vhost_edge_origin(req->vhost);
         
-        // @see https://github.com/ossrs/srs/issues/79
         // when origin is error, for instance, server is shutdown,
         // then user remove the vhost then reload, the conf is empty.
         if (!conf) {
@@ -110,7 +92,6 @@ srs_error_t SrsEdgeRtmpUpstream::connect(SrsRequest* r, SrsLbRoundRobin* lb)
         selected_port = port;
         
         // support vhost tranform for edge,
-        // @see https://github.com/ossrs/srs/issues/372
         std::string vhost = _srs_config->get_vhost_edge_transform_vhost(req->vhost);
         vhost = srs_string_replace(vhost, "[vhost]", req->vhost);
         
@@ -220,8 +201,8 @@ void SrsEdgeIngester::stop()
 {
     trd->stop();
     upstream->close();
-    
-    // notice to unpublish.
+
+    // Notify source to un-publish if exists.
     if (source) {
         source->on_unpublish();
     }
@@ -249,6 +230,11 @@ srs_error_t SrsEdgeIngester::cycle()
         if ((err = do_cycle()) != srs_success) {
             srs_warn("EdgeIngester: Ignore error, %s", srs_error_desc(err).c_str());
             srs_freep(err);
+        }
+
+        // Check whether coroutine is stopped, see https://github.com/ossrs/srs/issues/2901
+        if ((err = trd->pull()) != srs_success) {
+            return srs_error_wrap(err, "edge ingester");
         }
 
         srs_usleep(SRS_EDGE_INGESTER_CIMS);
@@ -495,7 +481,6 @@ srs_error_t SrsEdgeForwarder::start()
         srs_parse_hostport(server, server, port);
         
         // support vhost tranform for edge,
-        // @see https://github.com/ossrs/srs/issues/372
         std::string vhost = _srs_config->get_vhost_edge_transform_vhost(req->vhost);
         vhost = srs_string_replace(vhost, "[vhost]", req->vhost);
         
@@ -690,6 +675,8 @@ srs_error_t SrsPlayEdge::on_client_play()
     if (state == SrsEdgeStateInit) {
         state = SrsEdgeStatePlay;
         err = ingester->start();
+    } else if (state == SrsEdgeStateIngestStopping) {
+        return srs_error_new(ERROR_RTMP_EDGE_PLAY_STATE, "state is stopping");
     }
     
     return err;
@@ -776,7 +763,6 @@ srs_error_t SrsPublishEdge::on_client_publish()
         return srs_error_new(ERROR_RTMP_EDGE_PUBLISH_STATE, "invalid state");
     }
     
-    // @see https://github.com/ossrs/srs/issues/180
     // to avoid multiple publish the same stream on the same edge,
     // directly enter the publish stage.
     if (true) {
@@ -788,7 +774,6 @@ srs_error_t SrsPublishEdge::on_client_publish()
     // start to forward stream to origin.
     err = forwarder->start();
     
-    // @see https://github.com/ossrs/srs/issues/180
     // when failed, revert to init
     if (err != srs_success) {
         SrsEdgeState pstate = state;

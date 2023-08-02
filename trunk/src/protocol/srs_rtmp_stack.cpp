@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_rtmp_stack.hpp>
 
@@ -1053,7 +1036,6 @@ srs_error_t SrsProtocol::read_message_header(SrsChunkStream* chunk, char fmt)
         // 0x04             where: message_type=4(protocol control user-control message)
         // 0x00 0x06            where: event Ping(0x06)
         // 0x00 0x00 0x0d 0x0f  where: event data 4bytes ping timestamp.
-        // @see: https://github.com/ossrs/srs/issues/98
         if (fmt == RTMP_FMT_TYPE1) {
             srs_warn("fresh chunk starts with fmt=1");
         } else {
@@ -1192,7 +1174,6 @@ srs_error_t SrsProtocol::read_message_header(SrsChunkStream* chunk, char fmt)
         pp[0] = *p++;
         
         // always use 31bits timestamp, for some server may use 32bits extended timestamp.
-        // @see https://github.com/ossrs/srs/issues/111
         timestamp &= 0x7fffffff;
         
         /**
@@ -1639,17 +1620,19 @@ SrsResponse::~SrsResponse()
 string srs_client_type_string(SrsRtmpConnType type)
 {
     switch (type) {
-        case SrsRtmpConnPlay: return "Play";
+        case SrsRtmpConnPlay: return "rtmp-play";
+        case SrsRtcConnPlay: return "rtc-play";
         case SrsRtmpConnFlashPublish: return "flash-publish";
         case SrsRtmpConnFMLEPublish: return "fmle-publish";
         case SrsRtmpConnHaivisionPublish: return "haivision-publish";
+        case SrsRtcConnPublish: return "rtc-publish";
         default: return "Unknown";
     }
 }
 
 bool srs_client_type_is_publish(SrsRtmpConnType type)
 {
-    return type != SrsRtmpConnPlay;
+    return ((type != SrsRtmpConnPlay) && (type != SrsRtcConnPlay));
 }
 
 SrsHandshakeBytes::SrsHandshakeBytes()

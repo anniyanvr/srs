@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_kernel_codec.hpp>
 
@@ -505,6 +488,9 @@ srs_error_t SrsFrame::initialize(SrsCodecConfig* c)
 srs_error_t SrsFrame::add_sample(char* bytes, int size)
 {
     srs_error_t err = srs_success;
+
+    // Ignore empty sample.
+    if (!bytes || size <= 0) return err;
     
     if (nb_samples >= SrsMaxNbSamples) {
         return srs_error_new(ERROR_HLS_DECODE_ERROR, "Frame samples overflow");
@@ -558,6 +544,8 @@ srs_error_t SrsVideoFrame::add_sample(char* bytes, int size)
     if ((err = SrsFrame::add_sample(bytes, size)) != srs_success) {
         return srs_error_wrap(err, "add frame");
     }
+
+    if (!bytes || size <= 0) return err;
     
     // for video, parse the nalu type, set the IDR flag.
     SrsAvcNaluType nal_unit_type = (SrsAvcNaluType)(bytes[0] & 0x1f);
@@ -823,41 +811,47 @@ srs_error_t SrsFormat::avc_demux_sps_pps(SrsBuffer* stream)
     }
     int8_t numOfSequenceParameterSets = stream->read_1bytes();
     numOfSequenceParameterSets &= 0x1f;
-    if (numOfSequenceParameterSets != 1) {
+    if (numOfSequenceParameterSets < 1) {
         return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS");
     }
-    if (!stream->require(2)) {
-        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS size");
+    // Support for multiple SPS, then pick the first non-empty one.
+    for (int i = 0; i < numOfSequenceParameterSets; ++i) {
+        if (!stream->require(2)) {
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS size");
+        }
+        uint16_t sequenceParameterSetLength = stream->read_2bytes();
+        if (!stream->require(sequenceParameterSetLength)) {
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS data");
+        }
+        if (sequenceParameterSetLength > 0) {
+            vcodec->sequenceParameterSetNALUnit.resize(sequenceParameterSetLength);
+            stream->read_bytes(&vcodec->sequenceParameterSetNALUnit[0], sequenceParameterSetLength);
+        }
     }
-    uint16_t sequenceParameterSetLength = stream->read_2bytes();
-    if (!stream->require(sequenceParameterSetLength)) {
-        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS data");
-    }
-    if (sequenceParameterSetLength > 0) {
-        vcodec->sequenceParameterSetNALUnit.resize(sequenceParameterSetLength);
-        stream->read_bytes(&vcodec->sequenceParameterSetNALUnit[0], sequenceParameterSetLength);
-    }
+
     // 1 pps
     if (!stream->require(1)) {
         return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS");
     }
     int8_t numOfPictureParameterSets = stream->read_1bytes();
     numOfPictureParameterSets &= 0x1f;
-    if (numOfPictureParameterSets != 1) {
-        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS");
+    if (numOfPictureParameterSets < 1) {
+        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode SPS");
     }
-    if (!stream->require(2)) {
-        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS size");
+    // Support for multiple PPS, then pick the first non-empty one.
+    for (int i = 0; i < numOfPictureParameterSets; ++i) {
+        if (!stream->require(2)) {
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS size");
+        }
+        uint16_t pictureParameterSetLength = stream->read_2bytes();
+        if (!stream->require(pictureParameterSetLength)) {
+            return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS data");
+        }
+        if (pictureParameterSetLength > 0) {
+            vcodec->pictureParameterSetNALUnit.resize(pictureParameterSetLength);
+            stream->read_bytes(&vcodec->pictureParameterSetNALUnit[0], pictureParameterSetLength);
+        }
     }
-    uint16_t pictureParameterSetLength = stream->read_2bytes();
-    if (!stream->require(pictureParameterSetLength)) {
-        return srs_error_new(ERROR_HLS_DECODE_ERROR, "decode PPS data");
-    }
-    if (pictureParameterSetLength > 0) {
-        vcodec->pictureParameterSetNALUnit.resize(pictureParameterSetLength);
-        stream->read_bytes(&vcodec->pictureParameterSetNALUnit[0], pictureParameterSetLength);
-    }
-    
     return avc_demux_sps();
 }
 
@@ -1081,10 +1075,57 @@ srs_error_t SrsFormat::avc_demux_sps_rbsp(char* rbsp, int nb_rbsp)
     if ((err = srs_avc_nalu_read_uev(&bs, pic_height_in_map_units_minus1)) != srs_success) {
         return srs_error_wrap(err, "read pic_height_in_map_units_minus1");;
     }
-    
-    vcodec->width = (int)(pic_width_in_mbs_minus1 + 1) * 16;
-    vcodec->height = (int)(pic_height_in_map_units_minus1 + 1) * 16;
-    
+
+    int8_t frame_mbs_only_flag = -1;
+    if ((err = srs_avc_nalu_read_bit(&bs, frame_mbs_only_flag)) != srs_success) {
+        return srs_error_wrap(err, "read frame_mbs_only_flag");;
+    }
+    if(!frame_mbs_only_flag) {
+        /* Skip mb_adaptive_frame_field_flag */
+        int8_t mb_adaptive_frame_field_flag = -1;
+        if ((err = srs_avc_nalu_read_bit(&bs, mb_adaptive_frame_field_flag)) != srs_success) {
+            return srs_error_wrap(err, "read mb_adaptive_frame_field_flag");;
+        }
+    }
+
+    /* Skip direct_8x8_inference_flag */
+    int8_t direct_8x8_inference_flag = -1;
+    if ((err = srs_avc_nalu_read_bit(&bs, direct_8x8_inference_flag)) != srs_success) {
+        return srs_error_wrap(err, "read direct_8x8_inference_flag");;
+    }
+
+    /* We need the following value to evaluate offsets, if any */
+    int8_t frame_cropping_flag = -1;
+    if ((err = srs_avc_nalu_read_bit(&bs, frame_cropping_flag)) != srs_success) {
+        return srs_error_wrap(err, "read frame_cropping_flag");;
+    }
+    int32_t frame_crop_left_offset = 0, frame_crop_right_offset = 0,
+            frame_crop_top_offset = 0, frame_crop_bottom_offset = 0;
+    if(frame_cropping_flag) {
+        if ((err = srs_avc_nalu_read_uev(&bs, frame_crop_left_offset)) != srs_success) {
+            return srs_error_wrap(err, "read frame_crop_left_offset");;
+        }
+        if ((err = srs_avc_nalu_read_uev(&bs, frame_crop_right_offset)) != srs_success) {
+            return srs_error_wrap(err, "read frame_crop_right_offset");;
+        }
+        if ((err = srs_avc_nalu_read_uev(&bs, frame_crop_top_offset)) != srs_success) {
+            return srs_error_wrap(err, "read frame_crop_top_offset");;
+        }
+        if ((err = srs_avc_nalu_read_uev(&bs, frame_crop_bottom_offset)) != srs_success) {
+            return srs_error_wrap(err, "read frame_crop_bottom_offset");;
+        }
+    }
+
+    /* Skip vui_parameters_present_flag */
+    int8_t vui_parameters_present_flag = -1;
+    if ((err = srs_avc_nalu_read_bit(&bs, vui_parameters_present_flag)) != srs_success) {
+        return srs_error_wrap(err, "read vui_parameters_present_flag");;
+    }
+
+    vcodec->width = ((pic_width_in_mbs_minus1 + 1) * 16) - frame_crop_left_offset * 2 - frame_crop_right_offset * 2;
+    vcodec->height = ((2 - frame_mbs_only_flag) * (pic_height_in_map_units_minus1 + 1) * 16) \
+                    - (frame_crop_top_offset * 2) - (frame_crop_bottom_offset * 2);
+
     return err;
 }
 
@@ -1371,20 +1412,13 @@ srs_error_t SrsFormat::audio_mp3_demux(SrsBuffer* stream, int64_t timestamp)
     // we always decode aac then mp3.
     srs_assert(acodec->id == SrsAudioCodecIdMP3);
     
-    // Update the RAW MP3 data.
+    // Update the RAW MP3 data. Note the start is 12 bits syncword 0xFFF, so we should not skip any bytes, for detail
+    // please see ISO_IEC_11172-3-MP3-1993.pdf page 20 and 26.
     raw = stream->data() + stream->pos();
     nb_raw = stream->size() - stream->pos();
     
-    stream->skip(1);
-    if (stream->empty()) {
-        return err;
-    }
-    
-    char* data = stream->data() + stream->pos();
-    int size = stream->size() - stream->pos();
-    
     // mp3 payload.
-    if ((err = audio->add_sample(data, size)) != srs_success) {
+    if ((err = audio->add_sample(raw, nb_raw)) != srs_success) {
         return srs_error_wrap(err, "add audio frame");
     }
     

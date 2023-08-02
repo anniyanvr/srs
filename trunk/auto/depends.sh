@@ -299,15 +299,6 @@ function OSX_prepare()
         echo "Please install pkg-config"; exit -1;
     fi
 
-    if [[ $SRS_GB28181 == YES ]]; then
-        if [[ ! -f /usr/local/opt/libiconv/lib/libiconv.a ]]; then
-            echo "install libiconv"
-            echo "brew install libiconv"
-            brew install libiconv; ret=$?; if [[ 0 -ne $ret ]]; then return $ret; fi
-            echo "install libiconv success"
-        fi
-    fi
-
     if [[ $SRS_SRT == YES ]]; then
         echo "SRT enable, install depend tools"
         tclsh <<< "exit" >/dev/null 2>&1; ret=$?; if [[ 0 -ne $ret ]]; then
@@ -385,13 +376,17 @@ fi
 # state-threads
 #####################################################################################
 # check the cross build flag file, if flag changed, need to rebuild the st.
-_ST_MAKE=linux-debug && _ST_EXTRA_CFLAGS="-O0" && _ST_LD=${SRS_TOOL_LD} && _ST_OBJ="LINUX_`uname -r`_DBG"
+_ST_MAKE=linux-debug && _ST_EXTRA_CFLAGS="-O0" && _ST_OBJ="LINUX_`uname -r`_DBG"
 if [[ $SRS_VALGRIND == YES ]]; then
     _ST_EXTRA_CFLAGS="$_ST_EXTRA_CFLAGS -DMD_VALGRIND"
 fi
 # for osx, use darwin for st, donot use epoll.
 if [[ $SRS_OSX == YES ]]; then
-    _ST_MAKE=darwin-debug && _ST_EXTRA_CFLAGS="-DMD_HAVE_KQUEUE" && _ST_LD=${SRS_TOOL_CC} && _ST_OBJ="DARWIN_`uname -r`_DBG"
+    _ST_MAKE=darwin-debug && _ST_EXTRA_CFLAGS="-DMD_HAVE_KQUEUE" && _ST_OBJ="DARWIN_`uname -r`_DBG"
+fi
+# For Ubuntu, the epoll detection might be fail.
+if [[ $OS_IS_UBUNTU == YES ]]; then
+    _ST_EXTRA_CFLAGS="$_ST_EXTRA_CFLAGS -DMD_HAVE_EPOLL"
 fi
 # Whether enable debug stats.
 if [[ $SRS_DEBUG_STATS == YES ]]; then
@@ -426,7 +421,7 @@ else
         done &&
         # Build source code.
         make ${_ST_MAKE} EXTRA_CFLAGS="${_ST_EXTRA_CFLAGS}" \
-            CC=${SRS_TOOL_CC} AR=${SRS_TOOL_AR} LD=${_ST_LD} RANDLIB=${SRS_TOOL_RANDLIB} &&
+            CC=${SRS_TOOL_CC} AR=${SRS_TOOL_AR} LD=${SRS_TOOL_LD} RANDLIB=${SRS_TOOL_RANDLIB} &&
         cd .. && rm -rf st && ln -sf st-srs/${_ST_OBJ} st
     )
 fi
@@ -454,16 +449,7 @@ mkdir -p ${SRS_OBJS}/nginx
 # the demo dir.
 # create forward dir
 mkdir -p ${SRS_OBJS}/nginx/html/live &&
-mkdir -p ${SRS_OBJS}/nginx/html/forward/live
-
-# generate default html pages for android.
-html_file=${SRS_OBJS}/nginx/html/live/demo.html && hls_stream=demo.m3u8 && write_nginx_html5
 html_file=${SRS_OBJS}/nginx/html/live/livestream.html && hls_stream=livestream.m3u8 && write_nginx_html5
-html_file=${SRS_OBJS}/nginx/html/live/livestream_ld.html && hls_stream=livestream_ld.m3u8 && write_nginx_html5
-html_file=${SRS_OBJS}/nginx/html/live/livestream_sd.html && hls_stream=livestream_sd.m3u8 && write_nginx_html5
-html_file=${SRS_OBJS}/nginx/html/forward/live/livestream.html && hls_stream=livestream.m3u8 && write_nginx_html5
-html_file=${SRS_OBJS}/nginx/html/forward/live/livestream_ld.html && hls_stream=livestream_ld.m3u8 && write_nginx_html5
-html_file=${SRS_OBJS}/nginx/html/forward/live/livestream_sd.html && hls_stream=livestream_sd.m3u8 && write_nginx_html5
 
 # copy players to nginx html dir.
 rm -rf ${SRS_OBJS}/nginx/html/players &&
@@ -487,6 +473,15 @@ ln -sf `pwd`/research/api-server/static-dir/index.html ${SRS_OBJS}/nginx/html/in
 
 # nginx.html to detect whether nginx is alive
 echo "Nginx is ok." > ${SRS_OBJS}/nginx/html/nginx.html
+
+#####################################################################################
+# Generate default self-sign certificate for HTTPS server, test only.
+#####################################################################################
+if [[ ! -f conf/server.key || ! -f conf/server.crt ]]; then
+    openssl genrsa -out conf/server.key 2048
+    openssl req -new -x509 -key conf/server.key -out conf/server.crt -days 3650 -subj "/C=CN/ST=Beijing/L=Beijing/O=Me/OU=Me/CN=ossrs.net"
+    echo "Generate test-only self-sign certificate files"
+fi
 
 #####################################################################################
 # cherrypy for http hooks callback, CherryPy-3.2.4
@@ -513,8 +508,6 @@ if [[ $SRS_CHERRYPY == YES ]]; then
     echo "Link players to cherrypy static-dir"
     rm -rf research/api-server/static-dir/players &&
     ln -sf `pwd`/research/players research/api-server/static-dir/players &&
-    rm -f research/api-server/static-dir/crossdomain.xml &&
-    ln -sf `pwd`/research/players/crossdomain.xml research/api-server/static-dir/crossdomain.xml &&
     rm -rf research/api-server/static-dir/live &&
     mkdir -p `pwd`/${SRS_OBJS}/nginx/html/live &&
     ln -sf `pwd`/${SRS_OBJS}/nginx/html/live research/api-server/static-dir/live &&
@@ -538,7 +531,9 @@ if [[ $SRS_SSL == YES && $SRS_USE_SYS_SSL != YES ]]; then
     OPENSSL_CONFIG="./config"
     # https://stackoverflow.com/questions/15539062/cross-compiling-of-openssl-for-linux-arm-v5te-linux-gnueabi-toolchain
     if [[ $SRS_CROSS_BUILD == YES ]]; then
-        OPENSSL_CONFIG="./Configure linux-armv4"
+        OPENSSL_CONFIG="./Configure linux-generic32"
+        if [[ $SRS_CROSS_BUILD_ARCH == "arm" ]]; then OPENSSL_CONFIG="./Configure linux-armv4"; fi
+        if [[ $SRS_CROSS_BUILD_ARCH == "aarch64" ]]; then OPENSSL_CONFIG="./Configure linux-aarch64"; fi
     elif [[ ! -f ${SRS_OBJS}/${SRS_PLATFORM}/openssl/lib/libssl.a ]]; then
         # Try to use exists libraries.
         if [[ -f /usr/local/ssl/lib/libssl.a && $SRS_SSL_LOCAL == NO ]]; then
@@ -607,11 +602,22 @@ fi
 #####################################################################################
 # srtp
 #####################################################################################
-SRTP_CONFIG="echo SRTP without openssl(ASM) optimization" && SRTP_OPTIONS=""
+SRTP_OPTIONS=""
+# To eliminate warnings, see https://stackoverflow.com/a/34208904/17679565
+#       was built for newer macOS version (11.6) than being linked (11.0)
+if [[ $SRS_OSX == YES ]]; then
+    export MACOSX_DEPLOYMENT_TARGET=11.0
+    echo "Set MACOSX_DEPLOYMENT_TARGET to avoid warnings"
+fi
 # If use ASM for SRTP, we enable openssl(with ASM).
 if [[ $SRS_SRTP_ASM == YES ]]; then
-    echo "SRTP with openssl(ASM) optimization" &&
-    SRTP_CONFIG="export PKG_CONFIG_PATH=../openssl/lib/pkgconfig" && SRTP_OPTIONS="--enable-openssl"
+    SRTP_OPTIONS="--enable-openssl"
+    SRTP_CONFIGURE="env PKG_CONFIG_PATH=$(cd ${SRS_OBJS}/${SRS_PLATFORM} && pwd)/openssl/lib/pkgconfig ./configure"
+else
+    SRTP_CONFIGURE="./configure"
+fi
+if [[ $SRS_CROSS_BUILD == YES ]]; then
+    SRTP_OPTIONS="$SRTP_OPTIONS --host=$SRS_CROSS_BUILD_HOST"
 fi
 # Patched ST from https://github.com/ossrs/state-threads/tree/srs
 if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/libsrtp-2-fit/_release/lib/libsrtp2.a ]]; then
@@ -621,7 +627,8 @@ else
     (
         rm -rf ${SRS_OBJS}/srtp2 && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
         rm -rf libsrtp-2-fit && cp -R ../../3rdparty/libsrtp-2-fit . && cd libsrtp-2-fit &&
-        ${SRTP_CONFIG} && ./configure ${SRTP_OPTIONS} --prefix=`pwd`/_release &&
+        patch -p0 crypto/math/datatypes.c ../../../3rdparty/patches/srtp/gcc10-01.patch &&
+        $SRTP_CONFIGURE ${SRTP_OPTIONS} --prefix=`pwd`/_release &&
         make ${SRS_JOBS} && make install &&
         cd .. && rm -rf srtp2 && ln -sf libsrtp-2-fit/_release srtp2
     )
@@ -636,7 +643,12 @@ if [ ! -f ${SRS_OBJS}/srtp2/lib/libsrtp2.a ]; then echo "Build libsrtp-2-fit sta
 #####################################################################################
 # libopus, for WebRTC to transcode AAC with Opus.
 #####################################################################################
-if [[ $SRS_RTC == YES ]]; then
+# For cross build, we use opus of FFmpeg, so we don't build the libopus.
+if [[ $SRS_RTC == YES && $SRS_CROSS_BUILD == NO ]]; then
+    # Only build static libraries if no shared FFmpeg.
+    if [[ $SRS_SHARED_FFMPEG == NO ]]; then
+        OPUS_OPTIONS="--disable-shared --disable-doc"
+    fi
     if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/opus-1.3.1/_release/lib/libopus.a ]]; then
         echo "The opus-1.3.1 is ok.";
     else
@@ -644,7 +656,8 @@ if [[ $SRS_RTC == YES ]]; then
         (
             rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/opus-1.3.1 && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
             tar xf ../../3rdparty/opus-1.3.1.tar.gz && cd opus-1.3.1 &&
-            ./configure --prefix=`pwd`/_release --enable-static --disable-shared && make ${SRS_JOBS} && make install
+            ./configure --prefix=`pwd`/_release --enable-static $OPUS_OPTIONS &&
+            make ${SRS_JOBS} && make install &&
             cd .. && rm -rf opus && ln -sf opus-1.3.1/_release opus
         )
     fi
@@ -657,18 +670,32 @@ if [[ $SRS_RTC == YES ]]; then
 fi
 
 #####################################################################################
-# ffmpeg-fix, for WebRTC to transcode AAC with Opus.
+# ffmpeg-fit, for WebRTC to transcode AAC with Opus.
 #####################################################################################
 if [[ $SRS_FFMPEG_FIT == YES ]]; then
     FFMPEG_OPTIONS=""
-
-    # If disable nasm, disable all ASMs.
-    if [[ $SRS_NASM == NO ]]; then
-        FFMPEG_OPTIONS="--disable-asm --disable-x86asm --disable-inline-asm"
+    if [[ $SRS_CROSS_BUILD == YES ]]; then
+      FFMPEG_CONFIGURE=./configure
+    else
+      FFMPEG_CONFIGURE="env PKG_CONFIG_PATH=$(cd ${SRS_OBJS}/${SRS_PLATFORM} && pwd)/opus/lib/pkgconfig ./configure"
     fi
-    # If no nasm, we disable the x86asm.
-    nasm -v >/dev/null 2>&1; ret=$?; if [[ 0 -ne $ret ]]; then
-        FFMPEG_OPTIONS="--disable-x86asm"
+
+    # Disable all asm for FFmpeg, to compatible with ARM CPU.
+    FFMPEG_OPTIONS="--disable-asm --disable-x86asm --disable-inline-asm"
+    # Only build static libraries if no shared FFmpeg.
+    if [[ $SRS_SHARED_FFMPEG == YES ]]; then
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-shared"
+    fi
+    # For cross-build.
+    if [[ $SRS_CROSS_BUILD == YES ]]; then
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-cross-compile --target-os=linux"
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --arch=$SRS_CROSS_BUILD_ARCH";
+        if [[ $SRS_CROSS_BUILD_CPU != "" ]]; then FFMPEG_OPTIONS="$FFMPEG_OPTIONS --cpu=$SRS_CROSS_BUILD_CPU"; fi
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --cross-prefix=$SRS_CROSS_BUILD_PREFIX"
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --cc=${SRS_TOOL_CC} --cxx=${SRS_TOOL_CXX} --ar=${SRS_TOOL_AR} --ld=${_ST_LD}"
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-decoder=opus --enable-encoder=opus"
+    else
+        FFMPEG_OPTIONS="$FFMPEG_OPTIONS --enable-decoder=libopus --enable-encoder=libopus --enable-libopus"
     fi
 
     if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg-4-fit/_release/lib/libavcodec.a ]]; then
@@ -679,20 +706,25 @@ if [[ $SRS_FFMPEG_FIT == YES ]]; then
             rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg-4-fit && mkdir -p ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg-4-fit &&
             # Create a hidden directory .src
             cd ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg-4-fit && cp -R ../../../3rdparty/ffmpeg-4-fit/* . &&
-            # For libopus and other codecs.
-            ABS_OBJS=$(cd .. && pwd) &&
             # Build source code.
-            PKG_CONFIG_PATH=$ABS_OBJS/opus/lib/pkgconfig ./configure \
-              --prefix=`pwd`/_release \
-              --pkg-config-flags="--static" --extra-libs="-lpthread" --extra-libs="-lm" ${FFMPEG_OPTIONS} \
+            $FFMPEG_CONFIGURE \
+              --prefix=`pwd`/_release --pkg-config=pkg-config \
+              --pkg-config-flags="--static" --extra-libs="-lpthread" --extra-libs="-lm" \
+              --disable-everything ${FFMPEG_OPTIONS} \
               --disable-programs --disable-doc --disable-htmlpages --disable-manpages --disable-podpages --disable-txtpages \
               --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --disable-network \
               --disable-dct --disable-dwt --disable-error-resilience --disable-lsp --disable-lzo --disable-faan --disable-pixelutils \
-              --disable-hwaccels --disable-devices --disable-audiotoolbox --disable-videotoolbox --disable-cuda-llvm --disable-cuvid \
+              --disable-hwaccels --disable-devices --disable-audiotoolbox --disable-videotoolbox --disable-cuvid \
               --disable-d3d11va --disable-dxva2 --disable-ffnvcodec --disable-nvdec --disable-nvenc --disable-v4l2-m2m --disable-vaapi \
               --disable-vdpau --disable-appkit --disable-coreimage --disable-avfoundation --disable-securetransport --disable-iconv \
-              --disable-lzma --disable-sdl2 --disable-everything --enable-decoder=aac --enable-decoder=aac_fixed --enable-decoder=aac_latm \
-              --enable-decoder=libopus --enable-encoder=aac --enable-encoder=opus --enable-encoder=libopus --enable-libopus &&
+              --disable-lzma --disable-sdl2 --enable-decoder=aac --enable-decoder=aac_fixed --enable-decoder=aac_latm \
+              --enable-encoder=aac &&
+            # See https://www.laoyuyu.me/2019/05/23/android/clang_compile_ffmpeg/
+            if [[ $SRS_CROSS_BUILD == YES ]]; then
+              sed -i -e 's/#define getenv(x) NULL/\/\*#define getenv(x) NULL\*\//g' config.h &&
+              sed -i -e 's/#define HAVE_GMTIME_R 0/#define HAVE_GMTIME_R 1/g' config.h &&
+              sed -i -e 's/#define HAVE_LOCALTIME_R 0/#define HAVE_LOCALTIME_R 1/g' config.h
+            fi &&
             make ${SRS_JOBS} && make install &&
             cd .. && rm -rf ffmpeg && ln -sf ffmpeg-4-fit/_release ffmpeg
         )
@@ -708,10 +740,13 @@ fi
 #####################################################################################
 # live transcoding, ffmpeg-4.1, x264-core157, lame-3.99.5, libaacplus-2.0.2.
 #####################################################################################
+# Guess whether the ffmpeg is.
+SYSTEMP_FFMPEG_BIN=/usr/local/bin/ffmpeg
+if [[ ! -f $SYSTEMP_FFMPEG_BIN ]]; then SYSTEMP_FFMPEG_BIN=/usr/local/ffmpeg/bin/ffmpeg; fi
 # Always link the ffmpeg tools if exists.
-if [[ -f /usr/local/bin/ffmpeg && ! -f ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg ]]; then
+if [[ -f $SYSTEMP_FFMPEG_BIN && ! -f ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg ]]; then
     mkdir -p ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg/bin &&
-    ln -sf /usr/local/bin/ffmpeg ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg/bin/ffmpeg &&
+    ln -sf $SYSTEMP_FFMPEG_BIN ${SRS_OBJS}/${SRS_PLATFORM}/ffmpeg/bin/ffmpeg &&
     (cd ${SRS_OBJS} && rm -rf ffmpeg && ln -sf ${SRS_PLATFORM}/ffmpeg)
 fi
 if [ $SRS_FFMPEG_TOOL = YES ]; then
@@ -744,7 +779,12 @@ if [[ $SRS_SRT == YES ]]; then
                 exit -1;
             fi
             # Always disable c++11 for libsrt, because only the srt-app requres it.
-            LIBSRT_OPTIONS="--disable-app --enable-shared=0 --enable-static --enable-c++11=0"
+            LIBSRT_OPTIONS="--disable-app  --enable-static --enable-c++11=0"
+            if [[ $SRS_SHARED_SRT == YES ]]; then
+                LIBSRT_OPTIONS="$LIBSRT_OPTIONS --enable-shared=1"
+            else
+                LIBSRT_OPTIONS="$LIBSRT_OPTIONS --enable-shared=0"
+            fi
             # Start build libsrt.
             rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/srt-1-fit && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
             cp -R ../../3rdparty/srt-1-fit srt-1-fit && cd srt-1-fit &&
@@ -768,22 +808,21 @@ fi
 # build utest code
 #####################################################################################
 if [ $SRS_UTEST = YES ]; then
-    if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/gtest-1.6.0/include/gtest/gtest.h ]]; then
-        echo "The gtest-1.6.0 is ok.";
+    if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/gtest-fit/googletest/include/gtest/gtest.h ]]; then
+        echo "The gtest-fit is ok.";
     else
-        echo "Build gtest-1.6.0";
+        echo "Build gtest-fit";
         (
-            rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/gtest-1.6.0 && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
-            unzip -q ../../3rdparty/gtest-1.6.0.zip &&
-            rm -rf gtest && ln -sf gtest-1.6.0 gtest
+            cd ${SRS_OBJS}/${SRS_PLATFORM} && rm -rf gtest-fit && cp -R ../../3rdparty/gtest-fit gtest-fit
+            rm -rf gtest && ln -sf gtest-fit/googletest gtest
         )
     fi
     # check status
-    ret=$?; if [[ $ret -ne 0 ]]; then echo "Build gtest-1.6.0 failed, ret=$ret"; exit $ret; fi
+    ret=$?; if [[ $ret -ne 0 ]]; then echo "Build gtest-fit failed, ret=$ret"; exit $ret; fi
     # Always update the links.
-    (cd ${SRS_OBJS}/${SRS_PLATFORM} && rm -rf gtest && ln -sf gtest-1.6.0 gtest)
-    (cd ${SRS_OBJS} && rm -rf gtest && ln -sf ${SRS_PLATFORM}/gtest-1.6.0 gtest)
-    if [ ! -f ${SRS_OBJS}/gtest/include/gtest/gtest.h ]; then echo "Build gtest-1.6.0 failed."; exit -1; fi
+    (cd ${SRS_OBJS}/${SRS_PLATFORM} && rm -rf gtest && ln -sf gtest-fit/googletest gtest)
+    (cd ${SRS_OBJS} && rm -rf gtest && ln -sf ${SRS_PLATFORM}/gtest-fit/googletest gtest)
+    if [ ! -f ${SRS_OBJS}/gtest/include/gtest/gtest.h ]; then echo "Build gtest-fit failed."; exit -1; fi
 fi
 
 #####################################################################################
@@ -791,21 +830,21 @@ fi
 #####################################################################################
 if [ $SRS_GPERF = YES ]; then
     if [[ -f ${SRS_OBJS}/${SRS_PLATFORM}/gperf/bin/pprof ]]; then
-        echo "The gperftools-2.1 is ok.";
+        echo "The gperftools-2-fit is ok.";
     else
-        echo "Build gperftools-2.1";
+        echo "Build gperftools-2-fit";
         (
-            rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/gperftools-2.1 && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
-            unzip -q ../../3rdparty/gperftools-2.1.zip && cd gperftools-2.1 &&
+            rm -rf ${SRS_OBJS}/${SRS_PLATFORM}/gperftools-2-fit && cd ${SRS_OBJS}/${SRS_PLATFORM} &&
+            cp -R ../../3rdparty/gperftools-2-fit . && cd gperftools-2-fit &&
             ./configure --prefix=`pwd`/_release --enable-frame-pointers && make ${SRS_JOBS} && make install &&
-            cd .. && rm -rf gperf && ln -sf gperftools-2.1/_release gperf &&
+            cd .. && rm -rf gperf && ln -sf gperftools-2-fit/_release gperf &&
             rm -rf pprof && ln -sf gperf/bin/pprof pprof
         )
     fi
     # check status
-    ret=$?; if [[ $ret -ne 0 ]]; then echo "Build gperftools-2.1 failed, ret=$ret"; exit $ret; fi
+    ret=$?; if [[ $ret -ne 0 ]]; then echo "Build gperftools-2-fit failed, ret=$ret"; exit $ret; fi
     # Always update the links.
     (cd ${SRS_OBJS} && rm -rf pprof && ln -sf ${SRS_PLATFORM}/gperf/bin/pprof pprof)
-    (cd ${SRS_OBJS} && rm -rf gperf && ln -sf ${SRS_PLATFORM}/gperftools-2.1/_release gperf)
-    if [ ! -f ${SRS_OBJS}/pprof ]; then echo "Build gperftools-2.1 failed."; exit -1; fi
+    (cd ${SRS_OBJS} && rm -rf gperf && ln -sf ${SRS_PLATFORM}/gperftools-2-fit/_release gperf)
+    if [ ! -f ${SRS_OBJS}/pprof ]; then echo "Build gperftools-2-fit failed."; exit -1; fi
 fi

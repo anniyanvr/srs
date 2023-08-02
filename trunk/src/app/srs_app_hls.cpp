@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_hls.hpp>
 
@@ -80,6 +63,17 @@ void SrsHlsSegment::config_cipher(unsigned char* key,unsigned char* iv)
     
     SrsEncFileWriter* fw = (SrsEncFileWriter*)writer;
     fw->config_cipher(key, iv);
+}
+
+srs_error_t SrsHlsSegment::rename()
+{
+    if (true) {
+        std::stringstream ss;
+        ss << srsu2msi(duration());
+        uri = srs_string_replace(uri, "[duration]", ss.str());
+    }
+
+    return SrsFragment::rename();
 }
 
 SrsDvrAsyncCallOnHls::SrsDvrAsyncCallOnHls(SrsContextId c, SrsRequest* r, string p, string t, string m, string mu, int s, srs_utime_t d)
@@ -208,6 +202,7 @@ SrsHlsMuxer::SrsHlsMuxer()
     async = new SrsAsyncCallWorker();
     context = new SrsTsContext();
     segments = new SrsFragmentWindow();
+    latest_acodec_ = SrsAudioCodecIdForbidden;
     
     memset(key, 0, 16);
     memset(iv, 0, 16);
@@ -267,6 +262,24 @@ int SrsHlsMuxer::deviation()
     }
     
     return deviation_ts;
+}
+
+SrsAudioCodecId SrsHlsMuxer::latest_acodec()
+{
+    // If current context writer exists, we query from it.
+    if (current && current->tscw) return current->tscw->acodec();
+
+    // Get the configured or updated config.
+    return latest_acodec_;
+}
+
+void SrsHlsMuxer::set_latest_acodec(SrsAudioCodecId v)
+{
+    // Refresh the codec in context writer for current segment.
+    if (current && current->tscw) current->tscw->set_acodec(v);
+
+    // Refresh the codec for future segments.
+    latest_acodec_ = v;
 }
 
 srs_error_t SrsHlsMuxer::initialize()
@@ -377,6 +390,8 @@ srs_error_t SrsHlsMuxer::segment_open()
             srs_warn("hls: use aac for other codec=%s", default_acodec_str.c_str());
         }
     }
+    // Now that we know the latest audio codec in stream, use it.
+    if (latest_acodec_ != SrsAudioCodecIdForbidden) default_acodec = latest_acodec_;
     
     // load the default vcodec from config.
     SrsVideoCodecId default_vcodec = SrsVideoCodecIdAVC;
@@ -624,6 +639,11 @@ srs_error_t SrsHlsMuxer::do_segment_close()
     bool matchMinDuration = current->duration() >= SRS_HLS_SEGMENT_MIN_DURATION;
     bool matchMaxDuration = current->duration() <= max_td * 2 * 1000;
     if (matchMinDuration && matchMaxDuration) {
+        // rename from tmp to real path
+        if ((err = current->rename()) != srs_success) {
+            return srs_error_wrap(err, "rename");
+        }
+        
         // use async to call the http hooks, for it will cause thread switch.
         if ((err = async->execute(new SrsDvrAsyncCallOnHls(_srs_context->get_id(), req, current->fullpath(),
             current->uri, m3u8, m3u8_url, current->sequence_no, current->duration()))) != srs_success) {
@@ -637,12 +657,7 @@ srs_error_t SrsHlsMuxer::do_segment_close()
         
         // close the muxer of finished segment.
         srs_freep(current->tscw);
-        
-        // rename from tmp to real path
-        if ((err = current->rename()) != srs_success) {
-            return srs_error_wrap(err, "rename");
-        }
-        
+
         segments->append(current);
         current = NULL;
     } else {
@@ -940,16 +955,16 @@ srs_error_t SrsHlsController::on_unpublish()
 {
     srs_error_t err = srs_success;
 
-    if ((err = muxer->on_unpublish()) != srs_success) {
-        return srs_error_wrap(err, "muxer unpublish");
-    }
-    
     if ((err = muxer->flush_audio(tsmc)) != srs_success) {
         return srs_error_wrap(err, "hls: flush audio");
     }
     
     if ((err = muxer->segment_close()) != srs_success) {
         return srs_error_wrap(err, "hls: segment close");
+    }
+
+    if ((err = muxer->on_unpublish()) != srs_success) {
+        return srs_error_wrap(err, "muxer unpublish");
     }
     
     return err;
@@ -969,6 +984,13 @@ srs_error_t SrsHlsController::on_sequence_header()
 srs_error_t SrsHlsController::write_audio(SrsAudioFrame* frame, int64_t pts)
 {
     srs_error_t err = srs_success;
+
+    // Refresh the codec ASAP.
+    if (muxer->latest_acodec() != frame->acodec()->id) {
+        srs_trace("HLS: Switch audio codec %d(%s) to %d(%s)", muxer->latest_acodec(), srs_audio_codec_id2str(muxer->latest_acodec()).c_str(),
+            frame->acodec()->id, srs_audio_codec_id2str(frame->acodec()->id).c_str());
+        muxer->set_latest_acodec(frame->acodec()->id);
+    }
     
     // write audio to cache.
     if ((err = tsmc->cache_audio(frame, pts)) != srs_success) {
@@ -1361,7 +1383,7 @@ void SrsHls::hls_show_mux_log()
     // the run time is not equals to stream time,
     // @see: https://github.com/ossrs/srs/issues/81#issuecomment-48100994
     // it's ok.
-    srs_trace("-> " SRS_CONSTS_LOG_HLS " time=%dms, sno=%d, ts=%s, dur=%.2f, dva=%dp",
+    srs_trace("-> " SRS_CONSTS_LOG_HLS " time=%dms, sno=%d, ts=%s, dur=%dms, dva=%dp",
               pprint->age(), controller->sequence_no(), controller->ts_url().c_str(),
               srsu2msi(controller->duration()), controller->deviation());
 }

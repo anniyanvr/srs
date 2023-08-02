@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 John
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 John
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_RTC_CONN_HPP
 #define SRS_APP_RTC_CONN_HPP
@@ -40,6 +23,7 @@
 #include <srs_app_rtc_dtls.hpp>
 #include <srs_service_conn.hpp>
 #include <srs_app_conn.hpp>
+#include <srs_app_async_call.hpp>
 
 #include <string>
 #include <map>
@@ -212,6 +196,20 @@ public:
     virtual srs_error_t cycle();
 };
 
+// the rtc on_stop async call.
+class SrsRtcAsyncCallOnStop : public ISrsAsyncCallTask
+{
+private:
+    SrsContextId cid;
+    SrsRequest* req;
+public:
+    SrsRtcAsyncCallOnStop(SrsContextId c, SrsRequest* r);
+    virtual ~SrsRtcAsyncCallOnStop();
+public:
+    virtual srs_error_t call();
+    virtual std::string to_string();
+};
+
 // A RTC play stream, client pull and play stream from SRS.
 class SrsRtcPlayStream : public ISrsCoroutineHandler, public ISrsReloadHandler
     , public ISrsRtcPLIWorkerHandler, public ISrsRtcSourceChangeCallback
@@ -309,6 +307,20 @@ private:
     srs_error_t on_timer(srs_utime_t interval);
 };
 
+// the rtc on_unpublish async call.
+class SrsRtcAsyncCallOnUnpublish : public ISrsAsyncCallTask
+{
+private:
+    SrsContextId cid;
+    SrsRequest* req;
+public:
+    SrsRtcAsyncCallOnUnpublish(SrsContextId c, SrsRequest* r);
+    virtual ~SrsRtcAsyncCallOnUnpublish();
+public:
+    virtual srs_error_t call();
+    virtual std::string to_string();
+};
+
 // A RTC publish stream, client push and publish stream to SRS.
 class SrsRtcPublishStream : public ISrsRtspPacketDecodeHandler
     , public ISrsRtcPublishStream, public ISrsRtcPLIWorkerHandler
@@ -334,7 +346,7 @@ private:
     bool request_keyframe_;
     SrsErrorPithyPrint* pli_epp;
 private:
-    SrsRequest* req;
+    SrsRequest* req_;
     SrsRtcSource* source;
     // Simulators.
     int nn_simulate_nack_drop;
@@ -391,7 +403,7 @@ private:
     SrsRtcAudioRecvTrack* get_audio_track(uint32_t ssrc);
     SrsRtcVideoRecvTrack* get_video_track(uint32_t ssrc);
     void update_rtt(uint32_t ssrc, int rtt);
-    void update_send_report_time(uint32_t ssrc, const SrsNtp& ntp);
+    void update_send_report_time(uint32_t ssrc, const SrsNtp& ntp, uint32_t rtp_time);
 };
 
 // Callback for RTC connection.
@@ -421,7 +433,7 @@ private:
 //
 // For performance, we use non-public from resource,
 // see https://stackoverflow.com/questions/3747066/c-cannot-convert-from-base-a-to-derived-type-b-via-virtual-base-a
-class SrsRtcConnection : public ISrsResource, public ISrsDisposingHandler
+class SrsRtcConnection : public ISrsResource, public ISrsDisposingHandler, public ISrsExpire
 {
     friend class SrsSecurityTransport;
     friend class SrsRtcPlayStream;
@@ -464,8 +476,7 @@ private:
 private:
     // For each RTC session, we use a specified cid for debugging logs.
     SrsContextId cid_;
-    // TODO: FIXME: Rename to req_.
-    SrsRequest* req;
+    SrsRequest* req_;
     SrsSdp remote_sdp;
     SrsSdp local_sdp;
 private:
@@ -503,6 +514,9 @@ public:
 public:
     virtual const SrsContextId& get_id();
     virtual std::string desc();
+// Interface ISrsExpire.
+public:
+    virtual void expire();
 public:
     void switch_to_context();
     const SrsContextId& context_id();
@@ -554,12 +568,15 @@ private:
     srs_error_t on_binding_request(SrsStunPacket* r);
     // publish media capabilitiy negotiate
     srs_error_t negotiate_publish_capability(SrsRtcUserConfig* ruc, SrsRtcSourceDescription* stream_desc);
-    srs_error_t generate_publish_local_sdp(SrsRequest* req, SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan);
+    srs_error_t generate_publish_local_sdp(SrsRequest* req, SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan, bool audio_before_video);
+    srs_error_t generate_publish_local_sdp_for_audio(SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc);
+    srs_error_t generate_publish_local_sdp_for_video(SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan);
     // play media capabilitiy negotiate
     //TODO: Use StreamDescription to negotiate and remove first negotiate_play_capability function
     srs_error_t negotiate_play_capability(SrsRtcUserConfig* ruc, std::map<uint32_t, SrsRtcTrackDescription*>& sub_relations);
-    srs_error_t fetch_source_capability(SrsRequest* req, std::map<uint32_t, SrsRtcTrackDescription*>& sub_relations);
-    srs_error_t generate_play_local_sdp(SrsRequest* req, SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan);
+    srs_error_t generate_play_local_sdp(SrsRequest* req, SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan, bool audio_before_video);
+    srs_error_t generate_play_local_sdp_for_audio(SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, std::string cname);
+    srs_error_t generate_play_local_sdp_for_video(SrsSdp& local_sdp, SrsRtcSourceDescription* stream_desc, bool unified_plan, std::string cname);
     srs_error_t create_player(SrsRequest* request, std::map<uint32_t, SrsRtcTrackDescription*> sub_relations);
     srs_error_t create_publisher(SrsRequest* request, SrsRtcSourceDescription* stream_desc);
 };

@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 John
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 John
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_rtc_sdp.hpp>
 
@@ -73,30 +56,37 @@ static void skip_first_spaces(std::string& str)
 srs_error_t srs_parse_h264_fmtp(const std::string& fmtp, H264SpecificParam& h264_param)
 {
     srs_error_t err = srs_success;
-    std::vector<std::string> vec = split_str(fmtp, ";");
+
+    std::vector<std::string> vec = srs_string_split(fmtp, ";");
     for (size_t i = 0; i < vec.size(); ++i) {
-        std::vector<std::string> kv = split_str(vec[i], "=");
-        if (kv.size() == 2) {
-            if (kv[0] == "profile-level-id") {
-                h264_param.profile_level_id = kv[1];
-            } else if (kv[0] == "packetization-mode") {
-                // 6.3.  Non-Interleaved Mode
-                // This mode is in use when the value of the OPTIONAL packetization-mode
-                // media type parameter is equal to 1.  This mode SHOULD be supported.
-                // It is primarily intended for low-delay applications.  Only single NAL
-                // unit packets, STAP-As, and FU-As MAY be used in this mode.  STAP-Bs,
-                // MTAPs, and FU-Bs MUST NOT be used.  The transmission order of NAL
-                // units MUST comply with the NAL unit decoding order.
-                // @see https://tools.ietf.org/html/rfc6184#section-6.3
-                h264_param.packetization_mode = kv[1];
-            } else if (kv[0] == "level-asymmetry-allowed") {
-                h264_param.level_asymmerty_allow = kv[1];
-            } else {
-                return srs_error_new(ERROR_RTC_SDP_DECODE, "invalid h264 param=%s", kv[0].c_str());
-            }
-        } else {
-            return srs_error_new(ERROR_RTC_SDP_DECODE, "invalid h264 param=%s", vec[i].c_str());
+        std::vector<std::string> kv = srs_string_split(vec[i], "=");
+        if (kv.size() != 2) continue;
+
+        if (kv[0] == "profile-level-id") {
+            h264_param.profile_level_id = kv[1];
+        } else if (kv[0] == "packetization-mode") {
+            // 6.3.  Non-Interleaved Mode
+            // This mode is in use when the value of the OPTIONAL packetization-mode
+            // media type parameter is equal to 1.  This mode SHOULD be supported.
+            // It is primarily intended for low-delay applications.  Only single NAL
+            // unit packets, STAP-As, and FU-As MAY be used in this mode.  STAP-Bs,
+            // MTAPs, and FU-Bs MUST NOT be used.  The transmission order of NAL
+            // units MUST comply with the NAL unit decoding order.
+            // @see https://tools.ietf.org/html/rfc6184#section-6.3
+            h264_param.packetization_mode = kv[1];
+        } else if (kv[0] == "level-asymmetry-allowed") {
+            h264_param.level_asymmerty_allow = kv[1];
         }
+    }
+
+    if (h264_param.profile_level_id.empty()) {
+        return srs_error_new(ERROR_RTC_SDP_DECODE, "no h264 param: profile-level-id");
+    }
+    if (h264_param.packetization_mode.empty()) {
+        return srs_error_new(ERROR_RTC_SDP_DECODE, "no h264 param: packetization-mode");
+    }
+    if (h264_param.level_asymmerty_allow.empty()) {
+        return srs_error_new(ERROR_RTC_SDP_DECODE, "no h264 param: level-asymmetry-allowed");
     }
 
     return err;
@@ -162,7 +152,7 @@ srs_error_t SrsSessionInfo::encode(std::ostringstream& os)
     return err;
 }
 
-bool SrsSessionInfo::operator=(const SrsSessionInfo& rhs)
+bool SrsSessionInfo::operator==(const SrsSessionInfo& rhs)
 {
     return ice_ufrag_        == rhs.ice_ufrag_ &&
            ice_pwd_          == rhs.ice_pwd_ &&
@@ -170,6 +160,16 @@ bool SrsSessionInfo::operator=(const SrsSessionInfo& rhs)
            fingerprint_algo_ == rhs.fingerprint_algo_ &&
            fingerprint_      == rhs.fingerprint_ &&
            setup_            == rhs.setup_;
+}
+
+SrsSessionInfo &SrsSessionInfo::operator=(SrsSessionInfo other) {
+    std::swap(ice_ufrag_, other.ice_ufrag_);
+    std::swap(ice_pwd_, other.ice_pwd_);
+    std::swap(ice_options_, other.ice_options_);
+    std::swap(fingerprint_algo_, other.fingerprint_algo_);
+    std::swap(fingerprint_, other.fingerprint_);
+    std::swap(setup_, other.setup_);
+    return *this;
 }
 
 SrsSSRCInfo::SrsSSRCInfo()
@@ -763,6 +763,9 @@ srs_error_t SrsSdp::parse(const std::string& sdp_str)
         if (!line.empty() && line[line.size()-1] == '\r') {
             line.erase(line.size()-1, 1);
         }
+
+        // Strip the space of line, for pion WebRTC client.
+        line = srs_string_trim_end(line, " ");
 
         if ((err = parse_line(line)) != srs_success) {
             return srs_error_wrap(err, "parse sdp line failed");

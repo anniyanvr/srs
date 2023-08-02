@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2021 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2021 Winlin
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_hybrid.hpp>
 
@@ -153,7 +136,7 @@ srs_error_t SrsServerAdapter::initialize()
     return err;
 }
 
-srs_error_t SrsServerAdapter::run()
+srs_error_t SrsServerAdapter::run(SrsWaitGroup* wg)
 {
     srs_error_t err = srs_success;
 
@@ -190,7 +173,7 @@ srs_error_t SrsServerAdapter::run()
         return srs_error_wrap(err, "ingest");
     }
 
-    if ((err = srs->start()) != srs_success) {
+    if ((err = srs->start(wg)) != srs_success) {
         return srs_error_wrap(err, "start");
     }
 
@@ -199,6 +182,7 @@ srs_error_t SrsServerAdapter::run()
 
 void SrsServerAdapter::stop()
 {
+    srs->stop();
 }
 
 SrsServer* SrsServerAdapter::instance()
@@ -281,17 +265,20 @@ srs_error_t SrsHybridServer::run()
 {
     srs_error_t err = srs_success;
 
+    // Wait for all servers which need to do cleanup.
+    SrsWaitGroup wg;
+
     vector<ISrsHybridServer*>::iterator it;
     for (it = servers.begin(); it != servers.end(); ++it) {
         ISrsHybridServer* server = *it;
 
-        if ((err = server->run()) != srs_success) {
+        if ((err = server->run(&wg)) != srs_success) {
             return srs_error_wrap(err, "run server");
         }
     }
 
     // Wait for all server to quit.
-    srs_usleep(SRS_UTIME_NO_TIMEOUT);
+    wg.wait();
 
     return err;
 }
