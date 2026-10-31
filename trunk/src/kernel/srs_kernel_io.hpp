@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_KERNEL_IO_HPP
 #define SRS_KERNEL_IO_HPP
@@ -39,12 +22,13 @@ class ISrsReader
 public:
     ISrsReader();
     virtual ~ISrsReader();
+
 public:
     /**
      * Read bytes from reader.
      * @param nread How many bytes read from channel. NULL to ignore.
      */
-    virtual srs_error_t read(void* buf, size_t size, ssize_t* nread) = 0;
+    virtual srs_error_t read(void *buf, size_t size, ssize_t *nread) = 0;
 };
 
 /**
@@ -55,6 +39,7 @@ class ISrsSeeker
 public:
     ISrsSeeker();
     virtual ~ISrsSeeker();
+
 public:
     /**
      * The lseek() function repositions the offset of the file descriptor fildes to the argument offset, according to the
@@ -65,13 +50,13 @@ public:
      * @param seeked Upon successful completion, lseek() returns the resulting offset location as measured in bytes from
      *      the beginning of the file. NULL to ignore.
      */
-    virtual srs_error_t lseek(off_t offset, int whence, off_t* seeked) = 0;
+    virtual srs_error_t lseek(srs_off_t offset, int whence, srs_off_t *seeked) = 0;
 };
 
 /**
  * The reader and seeker.
  */
-class ISrsReadSeeker : virtual public ISrsReader, virtual public ISrsSeeker
+class ISrsReadSeeker : public ISrsReader, public ISrsSeeker
 {
 public:
     ISrsReadSeeker();
@@ -86,12 +71,13 @@ class ISrsStreamWriter
 public:
     ISrsStreamWriter();
     virtual ~ISrsStreamWriter();
+
 public:
     /**
      * write bytes over writer.
      * @nwrite the actual written bytes. NULL to ignore.
      */
-    virtual srs_error_t write(void* buf, size_t size, ssize_t* nwrite) = 0;
+    virtual srs_error_t write(void *buf, size_t size, ssize_t *nwrite) = 0;
 };
 
 /**
@@ -102,6 +88,7 @@ class ISrsVectorWriter
 public:
     ISrsVectorWriter();
     virtual ~ISrsVectorWriter();
+
 public:
     /**
      * write iov over writer.
@@ -109,13 +96,13 @@ public:
      * @remark for the HTTP FLV, to writev to improve performance.
      *      @see https://github.com/ossrs/srs/issues/405
      */
-    virtual srs_error_t writev(const iovec *iov, int iov_size, ssize_t* nwrite) = 0;
+    virtual srs_error_t writev(const iovec *iov, int iov_size, ssize_t *nwrite) = 0;
 };
 
 /**
  * The generally writer, stream and vector writer.
  */
-class ISrsWriter : virtual public ISrsStreamWriter, virtual public ISrsVectorWriter
+class ISrsWriter : public ISrsStreamWriter, public ISrsVectorWriter
 {
 public:
     ISrsWriter();
@@ -125,12 +112,27 @@ public:
 /**
  * The writer and seeker.
  */
-class ISrsWriteSeeker : virtual public ISrsWriter, virtual public ISrsSeeker
+class ISrsWriteSeeker : public ISrsWriter, public ISrsSeeker
 {
 public:
     ISrsWriteSeeker();
     virtual ~ISrsWriteSeeker();
 };
 
-#endif
+/**
+ * Get the statistic of channel.
+ */
+class ISrsProtocolStatistic
+{
+public:
+    ISrsProtocolStatistic();
+    virtual ~ISrsProtocolStatistic();
+    // For protocol
+public:
+    // Get the total recv bytes over underlay fd.
+    virtual int64_t get_recv_bytes() = 0;
+    // Get the total send bytes over underlay fd.
+    virtual int64_t get_send_bytes() = 0;
+};
 
+#endif

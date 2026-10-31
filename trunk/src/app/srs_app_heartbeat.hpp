@@ -1,42 +1,48 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_HEARTBEAT_HPP
 #define SRS_APP_HEARTBEAT_HPP
 
 #include <srs_core.hpp>
 
-// The http heartbeat to api-server to notice api that the information of SRS.
-class SrsHttpHeartbeat
+class ISrsAppConfig;
+class ISrsAppFactory;
+class ISrsStatistic;
+
+// The interface of the http heartbeat.
+class ISrsHttpHeartbeat
 {
+public:
+    ISrsHttpHeartbeat();
+    virtual ~ISrsHttpHeartbeat();
+
+public:
+    virtual void heartbeat() = 0;
+};
+
+// The http heartbeat to api-server to notice api that the information of SRS.
+class SrsHttpHeartbeat : public ISrsHttpHeartbeat
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsAppFactory *app_factory_;
+    ISrsStatistic *stat_;
+
 public:
     SrsHttpHeartbeat();
     virtual ~SrsHttpHeartbeat();
+
 public:
     virtual void heartbeat();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual srs_error_t do_heartbeat();
 };
 
 #endif
-

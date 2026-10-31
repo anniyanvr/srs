@@ -1,170 +1,183 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_http_api.hpp>
 
+#include <signal.h>
 #include <sstream>
 #include <stdlib.h>
-#include <signal.h>
-#include <unistd.h>
 using namespace std;
 
-#include <srs_kernel_log.hpp>
-#include <srs_kernel_error.hpp>
-#include <srs_app_st.hpp>
-#include <srs_core_autofree.hpp>
-#include <srs_protocol_json.hpp>
-#include <srs_kernel_utility.hpp>
-#include <srs_app_utility.hpp>
-#include <srs_app_statistic.hpp>
-#include <srs_rtmp_stack.hpp>
-#include <srs_app_dvr.hpp>
 #include <srs_app_config.hpp>
-#include <srs_app_source.hpp>
-#include <srs_app_http_conn.hpp>
-#include <srs_kernel_consts.hpp>
-#include <srs_app_server.hpp>
-#include <srs_protocol_amf0.hpp>
-#include <srs_protocol_utility.hpp>
 #include <srs_app_coworkers.hpp>
-#ifdef SRS_RTC
-#include <srs_app_rtc_conn.hpp>
+#include <srs_app_dvr.hpp>
+#include <srs_app_http_conn.hpp>
+#include <srs_app_rtmp_source.hpp>
+#include <srs_app_server.hpp>
+#include <srs_app_st.hpp>
+#include <srs_app_statistic.hpp>
+#include <srs_app_utility.hpp>
+#include <srs_core_autofree.hpp>
+#include <srs_kernel_consts.hpp>
+#include <srs_kernel_error.hpp>
+#include <srs_kernel_log.hpp>
+#include <srs_kernel_utility.hpp>
+#include <srs_protocol_amf0.hpp>
+#include <srs_protocol_json.hpp>
+#include <srs_protocol_rtmp_stack.hpp>
+#include <srs_protocol_utility.hpp>
+
+#ifdef SRS_VALGRIND
+#include <valgrind/memcheck.h>
+#include <valgrind/valgrind.h>
 #endif
 
-srs_error_t srs_api_response_jsonp(ISrsHttpResponseWriter* w, string callback, string data)
+srs_error_t srs_api_response_jsonp(ISrsHttpResponseWriter *w, string callback, string data)
 {
     srs_error_t err = srs_success;
-    
-    SrsHttpHeader* h = w->header();
-    
+
+    SrsHttpHeader *h = w->header();
+
     h->set_content_length(data.length() + callback.length() + 2);
     h->set_content_type("text/javascript");
-    
-    if (!callback.empty() && (err = w->write((char*)callback.data(), (int)callback.length())) != srs_success) {
+
+    if (!callback.empty() && (err = w->write((char *)callback.data(), (int)callback.length())) != srs_success) {
         return srs_error_wrap(err, "write jsonp callback");
     }
-    
-    static char* c0 = (char*)"(";
+
+    static char *c0 = (char *)"(";
     if ((err = w->write(c0, 1)) != srs_success) {
         return srs_error_wrap(err, "write jsonp left token");
     }
-    if ((err = w->write((char*)data.data(), (int)data.length())) != srs_success) {
+    if ((err = w->write((char *)data.data(), (int)data.length())) != srs_success) {
         return srs_error_wrap(err, "write jsonp data");
     }
-    
-    static char* c1 = (char*)")";
+
+    static char *c1 = (char *)")";
     if ((err = w->write(c1, 1)) != srs_success) {
         return srs_error_wrap(err, "write jsonp right token");
     }
-    
+
     return err;
 }
 
-srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter* w, string callback, int code)
+srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter *w, string callback, int code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(code));
-    
+
     return srs_api_response_jsonp(w, callback, obj->dumps());
 }
 
-srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter* w, string callback, srs_error_t err)
+srs_error_t srs_api_response_jsonp_code(ISrsHttpResponseWriter *w, string callback, srs_error_t err)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(srs_error_code(err)));
-    
+
     return srs_api_response_jsonp(w, callback, obj->dumps());
 }
 
-srs_error_t srs_api_response_json(ISrsHttpResponseWriter* w, string data)
+srs_error_t srs_api_response_json(ISrsHttpResponseWriter *w, string data)
 {
     srs_error_t err = srs_success;
-    
-    SrsHttpHeader* h = w->header();
-    
+
+    SrsHttpHeader *h = w->header();
+
     h->set_content_length(data.length());
-    h->set_content_type("application/json");
-    
-    if ((err = w->write((char*)data.data(), (int)data.length())) != srs_success) {
+    if (h->content_type().empty()) {
+        h->set_content_type("application/json");
+    }
+
+    if ((err = w->write((char *)data.data(), (int)data.length())) != srs_success) {
         return srs_error_wrap(err, "write json");
     }
-    
+
     return err;
 }
 
-srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter* w, int code)
+srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter *w, int code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(code));
-    
+
     return srs_api_response_json(w, obj->dumps());
 }
 
-srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter* w, srs_error_t code)
+srs_error_t srs_api_response_json_code(ISrsHttpResponseWriter *w, srs_error_t code)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(srs_error_code(code)));
-    
+
     return srs_api_response_json(w, obj->dumps());
 }
 
-srs_error_t srs_api_response(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, std::string json)
+srs_error_t srs_api_response(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, std::string json)
 {
     // no jsonp, directly response.
     if (!r->is_jsonp()) {
         return srs_api_response_json(w, json);
     }
-    
+
     // jsonp, get function name from query("callback")
     string callback = r->query_get("callback");
     return srs_api_response_jsonp(w, callback, json);
 }
 
-srs_error_t srs_api_response_code(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, int code)
+srs_error_t srs_api_response_code(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, int code)
 {
     // no jsonp, directly response.
     if (!r->is_jsonp()) {
         return srs_api_response_json_code(w, code);
     }
-    
+
     // jsonp, get function name from query("callback")
     string callback = r->query_get("callback");
     return srs_api_response_jsonp_code(w, callback, code);
 }
 
+void srs_api_parse_pagination(ISrsHttpMessage *r, int &start, int &count)
+{
+    std::string rstart = r->query_get("start");
+    std::string rcount = r->query_get("count");
+
+    // Parse start parameter, default to 0, minimum 0.
+    start = srs_max(0, atoi(rstart.c_str()));
+
+    // Parse count parameter, default to 10, minimum 1.
+    count = rcount.empty() ? 10 : srs_max(1, atoi(rcount.c_str()));
+}
+
+std::string srs_api_metrics_label_escape(const std::string &v)
+{
+    std::string r;
+    r.reserve(v.length());
+    for (size_t i = 0; i < v.length(); i++) {
+        char c = v.at(i);
+        if (c == '\\') {
+            r.append("\\\\");
+        } else if (c == '"') {
+            r.append("\\\"");
+        } else if (c == '\n') {
+            r.append("\\n");
+        } else {
+            r.push_back(c);
+        }
+    }
+    return r;
+}
+
 // @remark we will free the code.
-srs_error_t srs_api_response_code(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, srs_error_t code)
+srs_error_t srs_api_response_code(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, srs_error_t code)
 {
     srs_error_t err = srs_success;
-    
+
     // no jsonp, directly response.
     if (!r->is_jsonp()) {
         err = srs_api_response_json_code(w, code);
@@ -173,7 +186,7 @@ srs_error_t srs_api_response_code(ISrsHttpResponseWriter* w, ISrsHttpMessage* r,
         string callback = r->query_get("callback");
         err = srs_api_response_jsonp_code(w, callback, code);
     }
-    
+
     if (code != srs_success) {
         srs_warn("error %s", srs_error_desc(code).c_str());
         srs_freep(code);
@@ -183,32 +196,33 @@ srs_error_t srs_api_response_code(ISrsHttpResponseWriter* w, ISrsHttpMessage* r,
 
 SrsGoApiRoot::SrsGoApiRoot()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiRoot::~SrsGoApiRoot()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiRoot::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiRoot::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* urls = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *urls = SrsJsonAny::object();
     obj->set("urls", urls);
-    
+
     urls->set("api", SrsJsonAny::str("the api root"));
 
     if (true) {
-        SrsJsonObject* rtc = SrsJsonAny::object();
+        SrsJsonObject *rtc = SrsJsonAny::object();
         urls->set("rtc", rtc);
 
-        SrsJsonObject* v1 = SrsJsonAny::object();
+        SrsJsonObject *v1 = SrsJsonAny::object();
         rtc->set("v1", v1);
 
         v1->set("play", SrsJsonAny::str("Play stream"));
@@ -221,51 +235,53 @@ srs_error_t SrsGoApiRoot::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage*
 
 SrsGoApiApi::SrsGoApiApi()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiApi::~SrsGoApiApi()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiApi::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiApi::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* urls = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *urls = SrsJsonAny::object();
     obj->set("urls", urls);
-    
+
     urls->set("v1", SrsJsonAny::str("the api version 1.0"));
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiV1::SrsGoApiV1()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiV1::~SrsGoApiV1()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiV1::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiV1::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* urls = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *urls = SrsJsonAny::object();
     obj->set("urls", urls);
-    
+
     urls->set("versions", SrsJsonAny::str("the version of SRS"));
     urls->set("summaries", SrsJsonAny::str("the summary(pid, argv, pwd, cpu, mem) of SRS"));
     urls->set("rusages", SrsJsonAny::str("the rusage of SRS"));
@@ -274,342 +290,354 @@ srs_error_t SrsGoApiV1::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r
     urls->set("meminfos", SrsJsonAny::str("the meminfo of system"));
     urls->set("authors", SrsJsonAny::str("the license, copyright, authors and contributors"));
     urls->set("features", SrsJsonAny::str("the supported features of SRS"));
-    urls->set("requests", SrsJsonAny::str("the request itself, for http debug"));
     urls->set("vhosts", SrsJsonAny::str("manage all vhosts or specified vhost"));
     urls->set("streams", SrsJsonAny::str("manage all streams or specified stream"));
     urls->set("clients", SrsJsonAny::str("manage all clients or specified client, default query top 10 clients"));
+    urls->set("forwards", SrsJsonAny::str("query all forwards or specified forward, filter by ?stream=id, default query top 10 forwards"));
     urls->set("raw", SrsJsonAny::str("raw api for srs, support CUID srs for instance the config"));
     urls->set("clusters", SrsJsonAny::str("origin cluster server API"));
-    urls->set("perf", SrsJsonAny::str("System performance stat"));
+#ifdef SRS_GPERF
     urls->set("tcmalloc", SrsJsonAny::str("tcmalloc api with params ?page=summary|api"));
+#endif
+#ifdef SRS_VALGRIND
+    urls->set("valgrind", SrsJsonAny::str("valgrind api with params ?check=full|added|changed|new|quick"));
+#endif
+#ifdef SRS_SIGNAL_API
+    urls->set("signal", SrsJsonAny::str("simulate signal api with params ?signo=SIGHUP|SIGUSR1|SIGUSR2|SIGTERM|SIGQUIT|SIGABRT|SIGINT"));
+#endif
 
-    SrsJsonObject* tests = SrsJsonAny::object();
+    SrsJsonObject *tests = SrsJsonAny::object();
     obj->set("tests", tests);
-    
+
     tests->set("requests", SrsJsonAny::str("show the request info"));
     tests->set("errors", SrsJsonAny::str("always return an error 100"));
     tests->set("redirects", SrsJsonAny::str("always redirect to /api/v1/test/errors"));
     tests->set("[vhost]", SrsJsonAny::str("http vhost for http://error.srs.com:1985/api/v1/tests/errors"));
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiVersion::SrsGoApiVersion()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiVersion::~SrsGoApiVersion()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiVersion::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiVersion::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
+
     data->set("major", SrsJsonAny::integer(VERSION_MAJOR));
     data->set("minor", SrsJsonAny::integer(VERSION_MINOR));
     data->set("revision", SrsJsonAny::integer(VERSION_REVISION));
     data->set("version", SrsJsonAny::str(RTMP_SIG_SRS_VERSION));
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiSummaries::SrsGoApiSummaries()
 {
+    stat_ = _srs_stat;
+    config_ = _srs_config;
 }
 
 SrsGoApiSummaries::~SrsGoApiSummaries()
 {
+    stat_ = NULL;
+    config_ = NULL;
 }
 
-srs_error_t SrsGoApiSummaries::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiSummaries::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    srs_api_dump_summaries(obj);
-    
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    srs_api_dump_summaries(config_, obj.get());
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiRusages::SrsGoApiRusages()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiRusages::~SrsGoApiRusages()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiRusages::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiRusages::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
-    SrsRusage* ru = srs_get_system_rusage();
-    
-    data->set("ok", SrsJsonAny::boolean(ru->ok));
-    data->set("sample_time", SrsJsonAny::integer(ru->sample_time));
-    data->set("ru_utime", SrsJsonAny::integer(ru->r.ru_utime.tv_sec));
-    data->set("ru_stime", SrsJsonAny::integer(ru->r.ru_stime.tv_sec));
-    data->set("ru_maxrss", SrsJsonAny::integer(ru->r.ru_maxrss));
-    data->set("ru_ixrss", SrsJsonAny::integer(ru->r.ru_ixrss));
-    data->set("ru_idrss", SrsJsonAny::integer(ru->r.ru_idrss));
-    data->set("ru_isrss", SrsJsonAny::integer(ru->r.ru_isrss));
-    data->set("ru_minflt", SrsJsonAny::integer(ru->r.ru_minflt));
-    data->set("ru_majflt", SrsJsonAny::integer(ru->r.ru_majflt));
-    data->set("ru_nswap", SrsJsonAny::integer(ru->r.ru_nswap));
-    data->set("ru_inblock", SrsJsonAny::integer(ru->r.ru_inblock));
-    data->set("ru_oublock", SrsJsonAny::integer(ru->r.ru_oublock));
-    data->set("ru_msgsnd", SrsJsonAny::integer(ru->r.ru_msgsnd));
-    data->set("ru_msgrcv", SrsJsonAny::integer(ru->r.ru_msgrcv));
-    data->set("ru_nsignals", SrsJsonAny::integer(ru->r.ru_nsignals));
-    data->set("ru_nvcsw", SrsJsonAny::integer(ru->r.ru_nvcsw));
-    data->set("ru_nivcsw", SrsJsonAny::integer(ru->r.ru_nivcsw));
-    
+
+    SrsRusage *ru = srs_get_system_rusage();
+
+    data->set("ok", SrsJsonAny::boolean(ru->ok_));
+    data->set("sample_time", SrsJsonAny::integer(ru->sample_time_));
+    data->set("ru_utime", SrsJsonAny::integer(ru->r_.ru_utime.tv_sec));
+    data->set("ru_stime", SrsJsonAny::integer(ru->r_.ru_stime.tv_sec));
+    data->set("ru_maxrss", SrsJsonAny::integer(ru->r_.ru_maxrss));
+    data->set("ru_ixrss", SrsJsonAny::integer(ru->r_.ru_ixrss));
+    data->set("ru_idrss", SrsJsonAny::integer(ru->r_.ru_idrss));
+    data->set("ru_isrss", SrsJsonAny::integer(ru->r_.ru_isrss));
+    data->set("ru_minflt", SrsJsonAny::integer(ru->r_.ru_minflt));
+    data->set("ru_majflt", SrsJsonAny::integer(ru->r_.ru_majflt));
+    data->set("ru_nswap", SrsJsonAny::integer(ru->r_.ru_nswap));
+    data->set("ru_inblock", SrsJsonAny::integer(ru->r_.ru_inblock));
+    data->set("ru_oublock", SrsJsonAny::integer(ru->r_.ru_oublock));
+    data->set("ru_msgsnd", SrsJsonAny::integer(ru->r_.ru_msgsnd));
+    data->set("ru_msgrcv", SrsJsonAny::integer(ru->r_.ru_msgrcv));
+    data->set("ru_nsignals", SrsJsonAny::integer(ru->r_.ru_nsignals));
+    data->set("ru_nvcsw", SrsJsonAny::integer(ru->r_.ru_nvcsw));
+    data->set("ru_nivcsw", SrsJsonAny::integer(ru->r_.ru_nivcsw));
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiSelfProcStats::SrsGoApiSelfProcStats()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiSelfProcStats::~SrsGoApiSelfProcStats()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiSelfProcStats::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiSelfProcStats::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
-    SrsProcSelfStat* u = srs_get_self_proc_stat();
-    
+
+    SrsProcSelfStat *u = srs_get_self_proc_stat();
+
     string state;
-    state += (char)u->state;
-    
-    data->set("ok", SrsJsonAny::boolean(u->ok));
-    data->set("sample_time", SrsJsonAny::integer(u->sample_time));
-    data->set("percent", SrsJsonAny::number(u->percent));
-    data->set("pid", SrsJsonAny::integer(u->pid));
-    data->set("comm", SrsJsonAny::str(u->comm));
+    state += (char)u->state_;
+
+    data->set("ok", SrsJsonAny::boolean(u->ok_));
+    data->set("sample_time", SrsJsonAny::integer(u->sample_time_));
+    data->set("percent", SrsJsonAny::number(u->percent_));
+    data->set("pid", SrsJsonAny::integer(u->pid_));
+    data->set("comm", SrsJsonAny::str(u->comm_));
     data->set("state", SrsJsonAny::str(state.c_str()));
-    data->set("ppid", SrsJsonAny::integer(u->ppid));
-    data->set("pgrp", SrsJsonAny::integer(u->pgrp));
-    data->set("session", SrsJsonAny::integer(u->session));
-    data->set("tty_nr", SrsJsonAny::integer(u->tty_nr));
-    data->set("tpgid", SrsJsonAny::integer(u->tpgid));
-    data->set("flags", SrsJsonAny::integer(u->flags));
-    data->set("minflt", SrsJsonAny::integer(u->minflt));
-    data->set("cminflt", SrsJsonAny::integer(u->cminflt));
-    data->set("majflt", SrsJsonAny::integer(u->majflt));
-    data->set("cmajflt", SrsJsonAny::integer(u->cmajflt));
-    data->set("utime", SrsJsonAny::integer(u->utime));
-    data->set("stime", SrsJsonAny::integer(u->stime));
-    data->set("cutime", SrsJsonAny::integer(u->cutime));
-    data->set("cstime", SrsJsonAny::integer(u->cstime));
-    data->set("priority", SrsJsonAny::integer(u->priority));
-    data->set("nice", SrsJsonAny::integer(u->nice));
-    data->set("num_threads", SrsJsonAny::integer(u->num_threads));
-    data->set("itrealvalue", SrsJsonAny::integer(u->itrealvalue));
-    data->set("starttime", SrsJsonAny::integer(u->starttime));
-    data->set("vsize", SrsJsonAny::integer(u->vsize));
-    data->set("rss", SrsJsonAny::integer(u->rss));
-    data->set("rsslim", SrsJsonAny::integer(u->rsslim));
-    data->set("startcode", SrsJsonAny::integer(u->startcode));
-    data->set("endcode", SrsJsonAny::integer(u->endcode));
-    data->set("startstack", SrsJsonAny::integer(u->startstack));
-    data->set("kstkesp", SrsJsonAny::integer(u->kstkesp));
-    data->set("kstkeip", SrsJsonAny::integer(u->kstkeip));
-    data->set("signal", SrsJsonAny::integer(u->signal));
-    data->set("blocked", SrsJsonAny::integer(u->blocked));
-    data->set("sigignore", SrsJsonAny::integer(u->sigignore));
-    data->set("sigcatch", SrsJsonAny::integer(u->sigcatch));
-    data->set("wchan", SrsJsonAny::integer(u->wchan));
-    data->set("nswap", SrsJsonAny::integer(u->nswap));
-    data->set("cnswap", SrsJsonAny::integer(u->cnswap));
-    data->set("exit_signal", SrsJsonAny::integer(u->exit_signal));
-    data->set("processor", SrsJsonAny::integer(u->processor));
-    data->set("rt_priority", SrsJsonAny::integer(u->rt_priority));
-    data->set("policy", SrsJsonAny::integer(u->policy));
-    data->set("delayacct_blkio_ticks", SrsJsonAny::integer(u->delayacct_blkio_ticks));
-    data->set("guest_time", SrsJsonAny::integer(u->guest_time));
-    data->set("cguest_time", SrsJsonAny::integer(u->cguest_time));
-    
+    data->set("ppid", SrsJsonAny::integer(u->ppid_));
+    data->set("pgrp", SrsJsonAny::integer(u->pgrp_));
+    data->set("session", SrsJsonAny::integer(u->session_));
+    data->set("tty_nr", SrsJsonAny::integer(u->tty_nr_));
+    data->set("tpgid", SrsJsonAny::integer(u->tpgid_));
+    data->set("flags", SrsJsonAny::integer(u->flags_));
+    data->set("minflt", SrsJsonAny::integer(u->minflt_));
+    data->set("cminflt", SrsJsonAny::integer(u->cminflt_));
+    data->set("majflt", SrsJsonAny::integer(u->majflt_));
+    data->set("cmajflt", SrsJsonAny::integer(u->cmajflt_));
+    data->set("utime", SrsJsonAny::integer(u->utime_));
+    data->set("stime", SrsJsonAny::integer(u->stime_));
+    data->set("cutime", SrsJsonAny::integer(u->cutime_));
+    data->set("cstime", SrsJsonAny::integer(u->cstime_));
+    data->set("priority", SrsJsonAny::integer(u->priority_));
+    data->set("nice", SrsJsonAny::integer(u->nice_));
+    data->set("num_threads", SrsJsonAny::integer(u->num_threads_));
+    data->set("itrealvalue", SrsJsonAny::integer(u->itrealvalue_));
+    data->set("starttime", SrsJsonAny::integer(u->starttime_));
+    data->set("vsize", SrsJsonAny::integer(u->vsize_));
+    data->set("rss", SrsJsonAny::integer(u->rss_));
+    data->set("rsslim", SrsJsonAny::integer(u->rsslim_));
+    data->set("startcode", SrsJsonAny::integer(u->startcode_));
+    data->set("endcode", SrsJsonAny::integer(u->endcode_));
+    data->set("startstack", SrsJsonAny::integer(u->startstack_));
+    data->set("kstkesp", SrsJsonAny::integer(u->kstkesp_));
+    data->set("kstkeip", SrsJsonAny::integer(u->kstkeip_));
+    data->set("signal", SrsJsonAny::integer(u->signal_));
+    data->set("blocked", SrsJsonAny::integer(u->blocked_));
+    data->set("sigignore", SrsJsonAny::integer(u->sigignore_));
+    data->set("sigcatch", SrsJsonAny::integer(u->sigcatch_));
+    data->set("wchan", SrsJsonAny::integer(u->wchan_));
+    data->set("nswap", SrsJsonAny::integer(u->nswap_));
+    data->set("cnswap", SrsJsonAny::integer(u->cnswap_));
+    data->set("exit_signal", SrsJsonAny::integer(u->exit_signal_));
+    data->set("processor", SrsJsonAny::integer(u->processor_));
+    data->set("rt_priority", SrsJsonAny::integer(u->rt_priority_));
+    data->set("policy", SrsJsonAny::integer(u->policy_));
+    data->set("delayacct_blkio_ticks", SrsJsonAny::integer(u->delayacct_blkio_ticks_));
+    data->set("guest_time", SrsJsonAny::integer(u->guest_time_));
+    data->set("cguest_time", SrsJsonAny::integer(u->cguest_time_));
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiSystemProcStats::SrsGoApiSystemProcStats()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiSystemProcStats::~SrsGoApiSystemProcStats()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiSystemProcStats::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiSystemProcStats::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
-    SrsProcSystemStat* s = srs_get_system_proc_stat();
-    
-    data->set("ok", SrsJsonAny::boolean(s->ok));
-    data->set("sample_time", SrsJsonAny::integer(s->sample_time));
-    data->set("percent", SrsJsonAny::number(s->percent));
-    data->set("user", SrsJsonAny::integer(s->user));
-    data->set("nice", SrsJsonAny::integer(s->nice));
-    data->set("sys", SrsJsonAny::integer(s->sys));
-    data->set("idle", SrsJsonAny::integer(s->idle));
-    data->set("iowait", SrsJsonAny::integer(s->iowait));
-    data->set("irq", SrsJsonAny::integer(s->irq));
-    data->set("softirq", SrsJsonAny::integer(s->softirq));
-    data->set("steal", SrsJsonAny::integer(s->steal));
-    data->set("guest", SrsJsonAny::integer(s->guest));
-    
+
+    SrsProcSystemStat *s = srs_get_system_proc_stat();
+
+    data->set("ok", SrsJsonAny::boolean(s->ok_));
+    data->set("sample_time", SrsJsonAny::integer(s->sample_time_));
+    data->set("percent", SrsJsonAny::number(s->percent_));
+    data->set("user", SrsJsonAny::integer(s->user_));
+    data->set("nice", SrsJsonAny::integer(s->nice_));
+    data->set("sys", SrsJsonAny::integer(s->sys_));
+    data->set("idle", SrsJsonAny::integer(s->idle_));
+    data->set("iowait", SrsJsonAny::integer(s->iowait_));
+    data->set("irq", SrsJsonAny::integer(s->irq_));
+    data->set("softirq", SrsJsonAny::integer(s->softirq_));
+    data->set("steal", SrsJsonAny::integer(s->steal_));
+    data->set("guest", SrsJsonAny::integer(s->guest_));
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiMemInfos::SrsGoApiMemInfos()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiMemInfos::~SrsGoApiMemInfos()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiMemInfos::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiMemInfos::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
-    SrsMemInfo* m = srs_get_meminfo();
-    
-    data->set("ok", SrsJsonAny::boolean(m->ok));
-    data->set("sample_time", SrsJsonAny::integer(m->sample_time));
-    data->set("percent_ram", SrsJsonAny::number(m->percent_ram));
-    data->set("percent_swap", SrsJsonAny::number(m->percent_swap));
-    data->set("MemActive", SrsJsonAny::integer(m->MemActive));
-    data->set("RealInUse", SrsJsonAny::integer(m->RealInUse));
-    data->set("NotInUse", SrsJsonAny::integer(m->NotInUse));
-    data->set("MemTotal", SrsJsonAny::integer(m->MemTotal));
-    data->set("MemFree", SrsJsonAny::integer(m->MemFree));
-    data->set("Buffers", SrsJsonAny::integer(m->Buffers));
-    data->set("Cached", SrsJsonAny::integer(m->Cached));
-    data->set("SwapTotal", SrsJsonAny::integer(m->SwapTotal));
-    data->set("SwapFree", SrsJsonAny::integer(m->SwapFree));
-    
+
+    SrsMemInfo *m = srs_get_meminfo();
+
+    data->set("ok", SrsJsonAny::boolean(m->ok_));
+    data->set("sample_time", SrsJsonAny::integer(m->sample_time_));
+    data->set("percent_ram", SrsJsonAny::number(m->percent_ram_));
+    data->set("percent_swap", SrsJsonAny::number(m->percent_swap_));
+    data->set("MemActive", SrsJsonAny::integer(m->MemActive_));
+    data->set("RealInUse", SrsJsonAny::integer(m->RealInUse_));
+    data->set("NotInUse", SrsJsonAny::integer(m->NotInUse_));
+    data->set("MemTotal", SrsJsonAny::integer(m->MemTotal_));
+    data->set("MemFree", SrsJsonAny::integer(m->MemFree_));
+    data->set("Buffers", SrsJsonAny::integer(m->Buffers_));
+    data->set("Cached", SrsJsonAny::integer(m->Cached_));
+    data->set("SwapTotal", SrsJsonAny::integer(m->SwapTotal_));
+    data->set("SwapFree", SrsJsonAny::integer(m->SwapFree_));
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiAuthors::SrsGoApiAuthors()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiAuthors::~SrsGoApiAuthors()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiAuthors::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiAuthors::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
+
     data->set("license", SrsJsonAny::str(RTMP_SIG_SRS_LICENSE));
     data->set("contributors", SrsJsonAny::str(SRS_CONSTRIBUTORS));
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiFeatures::SrsGoApiFeatures()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiFeatures::~SrsGoApiFeatures()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
+
     data->set("options", SrsJsonAny::str(SRS_USER_CONFIGURE));
     data->set("options2", SrsJsonAny::str(SRS_CONFIGURE));
     data->set("build", SrsJsonAny::str(SRS_BUILD_DATE));
     data->set("build2", SrsJsonAny::str(SRS_BUILD_TS));
-    
-    SrsJsonObject* features = SrsJsonAny::object();
+
+    SrsJsonObject *features = SrsJsonAny::object();
     data->set("features", features);
-    
+
     features->set("ssl", SrsJsonAny::boolean(true));
     features->set("hls", SrsJsonAny::boolean(true));
-#ifdef SRS_HDS
-    features->set("hds", SrsJsonAny::boolean(true));
-#else
-    features->set("hds", SrsJsonAny::boolean(false));
-#endif
     features->set("callback", SrsJsonAny::boolean(true));
     features->set("api", SrsJsonAny::boolean(true));
     features->set("httpd", SrsJsonAny::boolean(true));
@@ -638,968 +666,274 @@ srs_error_t SrsGoApiFeatures::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
 #else
     features->set("mr", SrsJsonAny::boolean(false));
 #endif
-    
+
+    // The build options, so a client can check the protocols and tools this binary was built with.
+#ifdef SRS_SRT
+    features->set("srt", SrsJsonAny::boolean(true));
+#else
+    features->set("srt", SrsJsonAny::boolean(false));
+#endif
+#ifdef SRS_RTSP
+    features->set("rtsp", SrsJsonAny::boolean(true));
+#else
+    features->set("rtsp", SrsJsonAny::boolean(false));
+#endif
+#ifdef SRS_GB28181
+    features->set("gb28181", SrsJsonAny::boolean(true));
+#else
+    features->set("gb28181", SrsJsonAny::boolean(false));
+#endif
+#ifdef SRS_RTC
+    features->set("rtc", SrsJsonAny::boolean(true));
+#else
+    features->set("rtc", SrsJsonAny::boolean(false));
+#endif
+#ifdef SRS_SIMULATOR
+    features->set("simulator", SrsJsonAny::boolean(true));
+#else
+    features->set("simulator", SrsJsonAny::boolean(false));
+#endif
+#ifdef SRS_SANITIZER
+    features->set("sanitizer", SrsJsonAny::boolean(true));
+#else
+    features->set("sanitizer", SrsJsonAny::boolean(false));
+#endif
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiRequests::SrsGoApiRequests()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiRequests::~SrsGoApiRequests()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiRequests::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiRequests::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsStatistic* stat = SrsStatistic::instance();
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
-    SrsJsonObject* data = SrsJsonAny::object();
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
+
     data->set("uri", SrsJsonAny::str(r->uri().c_str()));
     data->set("path", SrsJsonAny::str(r->path().c_str()));
-    
+
     // method
     data->set("METHOD", SrsJsonAny::str(r->method_str().c_str()));
-    
+
     // request headers
-    SrsJsonObject* headers = SrsJsonAny::object();
+    SrsJsonObject *headers = SrsJsonAny::object();
     data->set("headers", headers);
     r->header()->dumps(headers);
-    
+
     // server informations
-    SrsJsonObject* server = SrsJsonAny::object();
-    data->set("headers", server);
-    
+    SrsJsonObject *server = SrsJsonAny::object();
+    data->set("server", server);
+
     server->set("sigature", SrsJsonAny::str(RTMP_SIG_SRS_KEY));
     server->set("version", SrsJsonAny::str(RTMP_SIG_SRS_VERSION));
     server->set("link", SrsJsonAny::str(RTMP_SIG_SRS_URL));
-    server->set("time", SrsJsonAny::integer(srsu2ms(srs_get_system_time())));
-    
+    server->set("time", SrsJsonAny::integer(srsu2ms(srs_time_now_cached())));
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiVhosts::SrsGoApiVhosts()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiVhosts::~SrsGoApiVhosts()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiVhosts::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiVhosts::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
-    
-    SrsStatistic* stat = SrsStatistic::instance();
-    
+
     // path: {pattern}{vhost_id}
     // e.g. /api/v1/vhosts/100     pattern= /api/v1/vhosts/, vhost_id=100
-    int vid = r->parse_rest_id(entry->pattern);
-    SrsStatisticVhost* vhost = NULL;
-    
-    if (vid > 0 && (vhost = stat->find_vhost(vid)) == NULL) {
+    string vid = r->parse_rest_id(entry_->pattern);
+    SrsStatisticVhost *vhost = NULL;
+
+    if (!vid.empty() && (vhost = stat_->find_vhost_by_id(vid)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_VHOST_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
     if (r->is_http_get()) {
         if (!vhost) {
-            SrsJsonArray* data = SrsJsonAny::array();
+            SrsJsonArray *data = SrsJsonAny::array();
             obj->set("vhosts", data);
-            
-            if ((err = stat->dumps_vhosts(data)) != srs_success) {
+
+            if ((err = stat_->dumps_vhosts(data)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         } else {
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("vhost", data);;
-            
+            SrsJsonObject *data = SrsJsonAny::object();
+            obj->set("vhost", data);
+            ;
+
             if ((err = vhost->dumps(data)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         }
     } else {
         return srs_go_http_error(w, SRS_CONSTS_HTTP_MethodNotAllowed);
     }
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiStreams::SrsGoApiStreams()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiStreams::~SrsGoApiStreams()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiStreams::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiStreams::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
-    
-    SrsStatistic* stat = SrsStatistic::instance();
-    
+
     // path: {pattern}{stream_id}
     // e.g. /api/v1/streams/100     pattern= /api/v1/streams/, stream_id=100
-    int sid = r->parse_rest_id(entry->pattern);
-    
-    SrsStatisticStream* stream = NULL;
-    if (sid >= 0 && (stream = stat->find_stream(sid)) == NULL) {
+    string sid = r->parse_rest_id(entry_->pattern);
+
+    SrsStatisticStream *stream = NULL;
+    if (!sid.empty() && (stream = stat_->find_stream(sid)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_STREAM_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
     if (r->is_http_get()) {
         if (!stream) {
-            SrsJsonArray* data = SrsJsonAny::array();
-            obj->set("streams", data);
-            
-            if ((err = stat->dumps_streams(data)) != srs_success) {
+            // Add total count of streams
+            int64_t send_bytes = 0, recv_bytes = 0, nstreams = 0, nclients = 0, total_nclients = 0, nerrs = 0;
+            if ((err = stat_->dumps_metrics(send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
+                return srs_api_response_code(w, r, code);
+            }
+            obj->set("total", SrsJsonAny::integer(nstreams));
+
+            // Add streams
+            SrsJsonArray *data = SrsJsonAny::array();
+            obj->set("streams", data);
+
+            int start, count;
+            srs_api_parse_pagination(r, start, count);
+            if ((err = stat_->dumps_streams(data, start, count)) != srs_success) {
+                int code = srs_error_code(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         } else {
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("stream", data);;
-            
+            SrsJsonObject *data = SrsJsonAny::object();
+            obj->set("stream", data);
+            ;
+
             if ((err = stream->dumps(data)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         }
     } else {
         return srs_go_http_error(w, SRS_CONSTS_HTTP_MethodNotAllowed);
     }
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
-#ifdef SRS_RTC
-uint32_t SrsGoApiRtcPlay::ssrc_num = 0;
-
-SrsGoApiRtcPlay::SrsGoApiRtcPlay(SrsRtcServer* server)
-{
-    server_ = server;
-}
-
-SrsGoApiRtcPlay::~SrsGoApiRtcPlay()
-{
-}
-
-
-// Request:
-//      POST /rtc/v1/play/
-//      {
-//          "sdp":"offer...", "streamurl":"webrtc://r.ossrs.net/live/livestream",
-//          "api":'http...", "clientip":"..."
-//      }
-// Response:
-//      {"sdp":"answer...", "sid":"..."}
-// @see https://github.com/rtcdn/rtcdn-draft
-srs_error_t SrsGoApiRtcPlay::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    SrsJsonObject* res = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, res);
-
-    if ((err = do_serve_http(w, r, res)) != srs_success) {
-        srs_warn("RTC error %s", srs_error_desc(err).c_str()); srs_freep(err);
-        return srs_api_response_code(w, r, SRS_CONSTS_HTTP_BadRequest);
-    }
-
-    return srs_api_response(w, r, res->dumps());
-}
-
-srs_error_t SrsGoApiRtcPlay::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res)
-{
-    srs_error_t err = srs_success;
-
-    // For each RTC session, we use short-term HTTP connection.
-    SrsHttpHeader* hdr = w->header();
-    hdr->set("Connection", "Close");
-
-    // Parse req, the request json object, from body.
-    SrsJsonObject* req = NULL;
-    SrsAutoFree(SrsJsonObject, req);
-    if (true) {
-        string req_json;
-        if ((err = r->body_read_all(req_json)) != srs_success) {
-            return srs_error_wrap(err, "read body");
-        }
-
-        SrsJsonAny* json = SrsJsonAny::loads(req_json);
-        if (!json || !json->is_object()) {
-            return srs_error_new(ERROR_RTC_API_BODY, "invalid body %s", req_json.c_str());
-        }
-
-        req = json->to_object();
-    }
-
-    // Fetch params from req object.
-    SrsJsonAny* prop = NULL;
-    if ((prop = req->ensure_property_string("sdp")) == NULL) {
-        return srs_error_wrap(err, "not sdp");
-    }
-    string remote_sdp_str = prop->to_str();
-
-    if ((prop = req->ensure_property_string("streamurl")) == NULL) {
-        return srs_error_wrap(err, "not streamurl");
-    }
-    string streamurl = prop->to_str();
-
-    string clientip;
-    if ((prop = req->ensure_property_string("clientip")) != NULL) {
-        clientip = prop->to_str();
-    }
-
-    string api;
-    if ((prop = req->ensure_property_string("api")) != NULL) {
-        api = prop->to_str();
-    }
-
-    // TODO: FIXME: Parse vhost.
-    // Parse app and stream from streamurl.
-    string app;
-    string stream_name;
-    if (true) {
-        string tcUrl;
-        srs_parse_rtmp_url(streamurl, tcUrl, stream_name);
-
-        int port;
-        string schema, host, vhost, param;
-        srs_discovery_tc_url(tcUrl, schema, host, vhost, app, stream_name, port, param);
-    }
-
-    // For client to specifies the EIP of server.
-    string eip = r->query_get("eip");
-    // For client to specifies whether encrypt by SRTP.
-    string encrypt = r->query_get("encrypt");
-
-    srs_trace("RTC play %s, api=%s, clientip=%s, app=%s, stream=%s, offer=%dB, eip=%s, encrypt=%s",
-        streamurl.c_str(), api.c_str(), clientip.c_str(), app.c_str(), stream_name.c_str(), remote_sdp_str.length(),
-        eip.c_str(), encrypt.c_str());
-
-    // TODO: FIXME: It seems remote_sdp doesn't represents the full SDP information.
-    SrsSdp remote_sdp;
-    if ((err = remote_sdp.parse(remote_sdp_str)) != srs_success) {
-        return srs_error_wrap(err, "parse sdp failed: %s", remote_sdp_str.c_str());
-    }
-
-    if ((err = check_remote_sdp(remote_sdp)) != srs_success) {
-        return srs_error_wrap(err, "remote sdp check failed");
-    }
-
-    SrsRequest request;
-    request.app = app;
-    request.stream = stream_name;
-
-    // TODO: FIXME: Parse vhost.
-    // discovery vhost, resolve the vhost from config
-    SrsConfDirective* parsed_vhost = _srs_config->get_vhost("");
-    if (parsed_vhost) {
-        request.vhost = parsed_vhost->arg0();
-    }
-
-    SrsSdp local_sdp;
-    if ((err = exchange_sdp(&request, remote_sdp, local_sdp)) != srs_success) {
-        return srs_error_wrap(err, "remote sdp have error or unsupport attributes");
-    }
-
-    // Whether enabled.
-    bool server_enabled = _srs_config->get_rtc_server_enabled();
-    bool rtc_enabled = _srs_config->get_rtc_enabled(request.vhost);
-    if (server_enabled && !rtc_enabled) {
-        srs_warn("RTC disabled in vhost %s", request.vhost.c_str());
-    }
-    if (!server_enabled || !rtc_enabled) {
-        return srs_error_new(ERROR_RTC_DISABLED, "Disabled server=%d, rtc=%d, vhost=%s",
-            server_enabled, rtc_enabled, request.vhost.c_str());
-    }
-
-    // TODO: FIXME: When server enabled, but vhost disabled, should report error.
-    SrsRtcSession* session = NULL;
-    if ((err = server_->create_session(&request, remote_sdp, local_sdp, eip, false, &session)) != srs_success) {
-        return srs_error_wrap(err, "create session");
-    }
-    if (encrypt.empty()) {
-        session->set_encrypt(_srs_config->get_rtc_server_encrypt());
-    } else {
-        session->set_encrypt(encrypt != "false");
-    }
-
-    ostringstream os;
-    if ((err = local_sdp.encode(os)) != srs_success) {
-        return srs_error_wrap(err, "encode sdp");
-    }
-
-    string local_sdp_str = os.str();
-
-    srs_verbose("local_sdp=%s", local_sdp_str.c_str());
-
-    res->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    res->set("server", SrsJsonAny::integer(SrsStatistic::instance()->server_id()));
-
-    // TODO: add candidates in response json?
-
-    res->set("sdp", SrsJsonAny::str(local_sdp_str.c_str()));
-    res->set("sessionid", SrsJsonAny::str(session->username().c_str()));
-
-    srs_trace("RTC username=%s, offer=%dB, answer=%dB", session->username().c_str(),
-        remote_sdp_str.length(), local_sdp_str.length());
-
-    return err;
-}
-
-srs_error_t SrsGoApiRtcPlay::check_remote_sdp(const SrsSdp& remote_sdp)
-{
-    srs_error_t err = srs_success;
-
-    if (remote_sdp.group_policy_ != "BUNDLE") {
-        return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "now only support BUNDLE, group policy=%s", remote_sdp.group_policy_.c_str());
-    }
-
-    if (remote_sdp.media_descs_.empty()) {
-        return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no media descriptions");
-    }
-
-    for (std::vector<SrsMediaDesc>::const_iterator iter = remote_sdp.media_descs_.begin(); iter != remote_sdp.media_descs_.end(); ++iter) {
-        if (iter->type_ != "audio" && iter->type_ != "video") {
-            return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "unsupport media type=%s", iter->type_.c_str());
-        }
-
-        if (! iter->rtcp_mux_) {
-            return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "now only suppor rtcp-mux");
-        }
-
-        for (std::vector<SrsMediaPayloadType>::const_iterator iter_media = iter->payload_types_.begin(); iter_media != iter->payload_types_.end(); ++iter_media) {
-            if (iter->sendonly_) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "play API only support sendrecv/recvonly");
-            }
-        }
-    }
-
-    return err;
-}
-
-srs_error_t SrsGoApiRtcPlay::exchange_sdp(SrsRequest* req, const SrsSdp& remote_sdp, SrsSdp& local_sdp)
-{
-    srs_error_t err = srs_success;
-    local_sdp.version_ = "0";
-
-    local_sdp.username_        = RTMP_SIG_SRS_SERVER;
-    local_sdp.session_id_      = srs_int2str((int64_t)this);
-    local_sdp.session_version_ = "2";
-    local_sdp.nettype_         = "IN";
-    local_sdp.addrtype_        = "IP4";
-    local_sdp.unicast_address_ = "0.0.0.0";
-
-    local_sdp.session_name_ = "SRSPlaySession";
-
-    local_sdp.msid_semantic_ = "WMS";
-    local_sdp.msids_.push_back(req->app + "/" + req->stream);
-
-    local_sdp.group_policy_ = "BUNDLE";
-
-    bool nack_enabled = _srs_config->get_rtc_nack_enabled(req->vhost);
-
-    for (size_t i = 0; i < remote_sdp.media_descs_.size(); ++i) {
-        const SrsMediaDesc& remote_media_desc = remote_sdp.media_descs_[i];
-
-        if (remote_media_desc.is_audio()) {
-            local_sdp.media_descs_.push_back(SrsMediaDesc("audio"));
-        } else if (remote_media_desc.is_video()) {
-            local_sdp.media_descs_.push_back(SrsMediaDesc("video"));
-        }
-
-        SrsMediaDesc& local_media_desc = local_sdp.media_descs_.back();
-
-        if (remote_media_desc.is_audio()) {
-            // TODO: check opus format specific param
-            std::vector<SrsMediaPayloadType> payloads = remote_media_desc.find_media_with_encoding_name("opus");
-            for (std::vector<SrsMediaPayloadType>::iterator iter = payloads.begin(); iter != payloads.end(); ++iter) {
-                local_media_desc.payload_types_.push_back(*iter);
-                SrsMediaPayloadType& payload_type = local_media_desc.payload_types_.back();
-
-                // TODO: FIXME: Only support some transport algorithms.
-                vector<string> rtcp_fb;
-                payload_type.rtcp_fb_.swap(rtcp_fb);
-                for (int j = 0; j < (int)rtcp_fb.size(); j++) {
-                    if (nack_enabled) {
-                        if (rtcp_fb.at(j) == "nack" || rtcp_fb.at(j) == "nack pli") {
-                            payload_type.rtcp_fb_.push_back(rtcp_fb.at(j));
-                        }
-                    }
-                }
-
-                // Only choose one match opus codec.
-                break;
-            }
-
-            if (local_media_desc.payload_types_.empty()) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no found valid opus payload type");
-            }
-        } else if (remote_media_desc.is_video()) {
-            std::deque<SrsMediaPayloadType> backup_payloads;
-            std::vector<SrsMediaPayloadType> payloads = remote_media_desc.find_media_with_encoding_name("H264");
-            for (std::vector<SrsMediaPayloadType>::iterator iter = payloads.begin(); iter != payloads.end(); ++iter) {
-                if (iter->format_specific_param_.empty()) {
-                    backup_payloads.push_front(*iter);
-                    continue;
-                }
-                H264SpecificParam h264_param;
-                if ((err = parse_h264_fmtp(iter->format_specific_param_, h264_param)) != srs_success) {
-                    srs_error_reset(err); continue;
-                }
-
-                // Try to pick the "best match" H.264 payload type.
-                if (h264_param.packetization_mode == "1" && h264_param.level_asymmerty_allow == "1") {
-                    local_media_desc.payload_types_.push_back(*iter);
-                    SrsMediaPayloadType& payload_type = local_media_desc.payload_types_.back();
-
-                    // TODO: FIXME: Only support some transport algorithms.
-                    vector<string> rtcp_fb;
-                    payload_type.rtcp_fb_.swap(rtcp_fb);
-                    for (int j = 0; j < (int)rtcp_fb.size(); j++) {
-                        if (nack_enabled) {
-                            if (rtcp_fb.at(j) == "nack" || rtcp_fb.at(j) == "nack pli") {
-                                payload_type.rtcp_fb_.push_back(rtcp_fb.at(j));
-                            }
-                        }
-                    }
-
-                    // Only choose first match H.264 payload type.
-                    break;
-                }
-
-                backup_payloads.push_back(*iter);
-            }
-
-            // Try my best to pick at least one media payload type.
-            if (local_media_desc.payload_types_.empty() && ! backup_payloads.empty()) {
-                srs_warn("choose backup H.264 payload type=%d", backup_payloads.front().payload_type_);
-                local_media_desc.payload_types_.push_back(backup_payloads.front());
-            }
-
-            if (local_media_desc.payload_types_.empty()) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no found valid H.264 payload type");
-            }
-        }
-
-        local_media_desc.mid_ = remote_media_desc.mid_;
-        local_sdp.groups_.push_back(local_media_desc.mid_);
-
-        local_media_desc.port_ = 9;
-        local_media_desc.protos_ = "UDP/TLS/RTP/SAVPF";
-
-        if (remote_media_desc.session_info_.setup_ == "active") {
-            local_media_desc.session_info_.setup_ = "passive";
-        } else if (remote_media_desc.session_info_.setup_ == "passive") {
-            local_media_desc.session_info_.setup_ = "active";
-        } else if (remote_media_desc.session_info_.setup_ == "actpass") {
-            local_media_desc.session_info_.setup_ = "passive";
-        } else {
-            // @see: https://tools.ietf.org/html/rfc4145#section-4.1
-            // The default value of the setup attribute in an offer/answer exchange
-            // is 'active' in the offer and 'passive' in the answer.
-            local_media_desc.session_info_.setup_ = "passive";
-        }
-
-        if (remote_media_desc.sendonly_) {
-            local_media_desc.recvonly_ = true;
-        } else if (remote_media_desc.recvonly_) {
-            local_media_desc.sendonly_ = true;
-        } else if (remote_media_desc.sendrecv_) {
-            local_media_desc.sendrecv_ = true;
-        }
-
-        local_media_desc.rtcp_mux_ = true;
-        local_media_desc.rtcp_rsize_ = true;
-
-        // TODO: FIXME: Avoid SSRC collision.
-        if (!ssrc_num) {
-            ssrc_num = ::getpid() * 10000 + ::getpid() * 100 + ::getpid();
-        }
-
-        if (local_media_desc.sendonly_ || local_media_desc.sendrecv_) {
-            SrsSSRCInfo ssrc_info;
-            ssrc_info.ssrc_ = ++ssrc_num;
-            // TODO:use formated cname
-            ssrc_info.cname_ = "test_sdp_cname";
-            local_media_desc.ssrc_infos_.push_back(ssrc_info);
-        }
-    }
-
-    return err;
-}
-
-uint32_t SrsGoApiRtcPublish::ssrc_num = 0;
-
-SrsGoApiRtcPublish::SrsGoApiRtcPublish(SrsRtcServer* server)
-{
-    server_ = server;
-}
-
-SrsGoApiRtcPublish::~SrsGoApiRtcPublish()
-{
-}
-
-
-// Request:
-//      POST /rtc/v1/publish/
-//      {
-//          "sdp":"offer...", "streamurl":"webrtc://r.ossrs.net/live/livestream",
-//          "api":'http...", "clientip":"..."
-//      }
-// Response:
-//      {"sdp":"answer...", "sid":"..."}
-// @see https://github.com/rtcdn/rtcdn-draft
-srs_error_t SrsGoApiRtcPublish::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    SrsJsonObject* res = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, res);
-
-    if ((err = do_serve_http(w, r, res)) != srs_success) {
-        srs_warn("RTC error %s", srs_error_desc(err).c_str()); srs_freep(err);
-        return srs_api_response_code(w, r, SRS_CONSTS_HTTP_BadRequest);
-    }
-
-    return srs_api_response(w, r, res->dumps());
-}
-
-srs_error_t SrsGoApiRtcPublish::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res)
-{
-    srs_error_t err = srs_success;
-
-    // For each RTC session, we use short-term HTTP connection.
-    SrsHttpHeader* hdr = w->header();
-    hdr->set("Connection", "Close");
-
-    // Parse req, the request json object, from body.
-    SrsJsonObject* req = NULL;
-    if (true) {
-        string req_json;
-        if ((err = r->body_read_all(req_json)) != srs_success) {
-            return srs_error_wrap(err, "read body");
-        }
-
-        SrsJsonAny* json = SrsJsonAny::loads(req_json);
-        if (!json || !json->is_object()) {
-            return srs_error_new(ERROR_RTC_API_BODY, "invalid body %s", req_json.c_str());
-        }
-
-        req = json->to_object();
-    }
-
-    // Fetch params from req object.
-    SrsJsonAny* prop = NULL;
-    if ((prop = req->ensure_property_string("sdp")) == NULL) {
-        return srs_error_wrap(err, "not sdp");
-    }
-    string remote_sdp_str = prop->to_str();
-
-    if ((prop = req->ensure_property_string("streamurl")) == NULL) {
-        return srs_error_wrap(err, "not streamurl");
-    }
-    string streamurl = prop->to_str();
-
-    string clientip;
-    if ((prop = req->ensure_property_string("clientip")) != NULL) {
-        clientip = prop->to_str();
-    }
-
-    string api;
-    if ((prop = req->ensure_property_string("api")) != NULL) {
-        api = prop->to_str();
-    }
-
-    // Parse app and stream from streamurl.
-    string app;
-    string stream_name;
-    if (true) {
-        string tcUrl;
-        srs_parse_rtmp_url(streamurl, tcUrl, stream_name);
-
-        int port;
-        string schema, host, vhost, param;
-        srs_discovery_tc_url(tcUrl, schema, host, vhost, app, stream_name, port, param);
-    }
-
-    // For client to specifies the EIP of server.
-    string eip = r->query_get("eip");
-
-    srs_trace("RTC publish %s, api=%s, clientip=%s, app=%s, stream=%s, offer=%dB, eip=%s",
-        streamurl.c_str(), api.c_str(), clientip.c_str(), app.c_str(), stream_name.c_str(), remote_sdp_str.length(), eip.c_str());
-
-    // TODO: FIXME: It seems remote_sdp doesn't represents the full SDP information.
-    SrsSdp remote_sdp;
-    if ((err = remote_sdp.parse(remote_sdp_str)) != srs_success) {
-        return srs_error_wrap(err, "parse sdp failed: %s", remote_sdp_str.c_str());
-    }
-
-    if ((err = check_remote_sdp(remote_sdp)) != srs_success) {
-        return srs_error_wrap(err, "remote sdp check failed");
-    }
-
-    SrsRequest request;
-    request.app = app;
-    request.stream = stream_name;
-
-    // TODO: FIXME: Parse vhost.
-    // discovery vhost, resolve the vhost from config
-    SrsConfDirective* parsed_vhost = _srs_config->get_vhost("");
-    if (parsed_vhost) {
-        request.vhost = parsed_vhost->arg0();
-    }
-
-    SrsSdp local_sdp;
-    if ((err = exchange_sdp(&request, remote_sdp, local_sdp)) != srs_success) {
-        return srs_error_wrap(err, "remote sdp have error or unsupport attributes");
-    }
-
-    // Whether enabled.
-    bool server_enabled = _srs_config->get_rtc_server_enabled();
-    bool rtc_enabled = _srs_config->get_rtc_enabled(request.vhost);
-    if (server_enabled && !rtc_enabled) {
-        srs_warn("RTC disabled in vhost %s", request.vhost.c_str());
-    }
-    if (!server_enabled || !rtc_enabled) {
-        return srs_error_new(ERROR_RTC_DISABLED, "Disabled server=%d, rtc=%d, vhost=%s",
-            server_enabled, rtc_enabled, request.vhost.c_str());
-    }
-
-    // TODO: FIXME: When server enabled, but vhost disabled, should report error.
-    SrsRtcSession* session = NULL;
-    if ((err = server_->create_session(&request, remote_sdp, local_sdp, eip, true, &session)) != srs_success) {
-        return srs_error_wrap(err, "create session");
-    }
-
-    ostringstream os;
-    if ((err = local_sdp.encode(os)) != srs_success) {
-        return srs_error_wrap(err, "encode sdp");
-    }
-
-    string local_sdp_str = os.str();
-
-    srs_verbose("local_sdp=%s", local_sdp_str.c_str());
-
-    res->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    res->set("server", SrsJsonAny::integer(SrsStatistic::instance()->server_id()));
-
-    // TODO: add candidates in response json?
-
-    res->set("sdp", SrsJsonAny::str(local_sdp_str.c_str()));
-    res->set("sessionid", SrsJsonAny::str(session->username().c_str()));
-
-    srs_trace("RTC username=%s, offer=%dB, answer=%dB", session->username().c_str(),
-        remote_sdp_str.length(), local_sdp_str.length());
-
-    return err;
-}
-
-srs_error_t SrsGoApiRtcPublish::check_remote_sdp(const SrsSdp& remote_sdp)
-{
-    srs_error_t err = srs_success;
-
-    if (remote_sdp.group_policy_ != "BUNDLE") {
-        return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "now only support BUNDLE, group policy=%s", remote_sdp.group_policy_.c_str());
-    }
-
-    if (remote_sdp.media_descs_.empty()) {
-        return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no media descriptions");
-    }
-
-    for (std::vector<SrsMediaDesc>::const_iterator iter = remote_sdp.media_descs_.begin(); iter != remote_sdp.media_descs_.end(); ++iter) {
-        if (iter->type_ != "audio" && iter->type_ != "video") {
-            return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "unsupport media type=%s", iter->type_.c_str());
-        }
-
-        if (! iter->rtcp_mux_) {
-            return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "now only suppor rtcp-mux");
-        }
-
-        for (std::vector<SrsMediaPayloadType>::const_iterator iter_media = iter->payload_types_.begin(); iter_media != iter->payload_types_.end(); ++iter_media) {
-            if (iter->recvonly_) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "publish API only support sendrecv/sendonly");
-            }
-        }
-    }
-
-    return err;
-}
-
-srs_error_t SrsGoApiRtcPublish::exchange_sdp(SrsRequest* req, const SrsSdp& remote_sdp, SrsSdp& local_sdp)
-{
-    srs_error_t err = srs_success;
-    local_sdp.version_ = "0";
-
-    local_sdp.username_        = RTMP_SIG_SRS_SERVER;
-    local_sdp.session_id_      = srs_int2str((int64_t)this);
-    local_sdp.session_version_ = "2";
-    local_sdp.nettype_         = "IN";
-    local_sdp.addrtype_        = "IP4";
-    local_sdp.unicast_address_ = "0.0.0.0";
-
-    local_sdp.session_name_ = "SRSPublishSession";
-
-    local_sdp.msid_semantic_ = "WMS";
-    local_sdp.msids_.push_back(req->app + "/" + req->stream);
-
-    local_sdp.group_policy_ = "BUNDLE";
-
-    bool nack_enabled = _srs_config->get_rtc_nack_enabled(req->vhost);
-
-    for (size_t i = 0; i < remote_sdp.media_descs_.size(); ++i) {
-        const SrsMediaDesc& remote_media_desc = remote_sdp.media_descs_[i];
-
-        if (remote_media_desc.is_audio()) {
-            local_sdp.media_descs_.push_back(SrsMediaDesc("audio"));
-        } else if (remote_media_desc.is_video()) {
-            local_sdp.media_descs_.push_back(SrsMediaDesc("video"));
-        }
-
-        SrsMediaDesc& local_media_desc = local_sdp.media_descs_.back();
-
-        if (remote_media_desc.is_audio()) {
-            // TODO: check opus format specific param
-            std::vector<SrsMediaPayloadType> payloads = remote_media_desc.find_media_with_encoding_name("opus");
-            for (std::vector<SrsMediaPayloadType>::iterator iter = payloads.begin(); iter != payloads.end(); ++iter) {
-                local_media_desc.payload_types_.push_back(*iter);
-                SrsMediaPayloadType& payload_type = local_media_desc.payload_types_.back();
-
-                // TODO: FIXME: Only support some transport algorithms.
-                vector<string> rtcp_fb;
-                payload_type.rtcp_fb_.swap(rtcp_fb);
-                for (int j = 0; j < (int)rtcp_fb.size(); j++) {
-                    if (nack_enabled) {
-                        if (rtcp_fb.at(j) == "nack" || rtcp_fb.at(j) == "nack pli") {
-                            payload_type.rtcp_fb_.push_back(rtcp_fb.at(j));
-                        }
-                    }
-                }
-
-                // Only choose one match opus codec.
-                break;
-            }
-
-            if (local_media_desc.payload_types_.empty()) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no valid found opus payload type");
-            }
-
-        } else if (remote_media_desc.is_video()) {
-            std::deque<SrsMediaPayloadType> backup_payloads;
-            std::vector<SrsMediaPayloadType> payloads = remote_media_desc.find_media_with_encoding_name("H264");
-            for (std::vector<SrsMediaPayloadType>::iterator iter = payloads.begin(); iter != payloads.end(); ++iter) {
-                if (iter->format_specific_param_.empty()) {
-                    backup_payloads.push_front(*iter);
-                    continue;
-                }
-                H264SpecificParam h264_param;
-                if ((err = parse_h264_fmtp(iter->format_specific_param_, h264_param)) != srs_success) {
-                    srs_error_reset(err); continue;
-                }
-
-                // Try to pick the "best match" H.264 payload type.
-                if (h264_param.packetization_mode == "1" && h264_param.level_asymmerty_allow == "1") {
-                    local_media_desc.payload_types_.push_back(*iter);
-                    SrsMediaPayloadType& payload_type = local_media_desc.payload_types_.back();
-
-                    // TODO: FIXME: Only support some transport algorithms.
-                    vector<string> rtcp_fb;
-                    payload_type.rtcp_fb_.swap(rtcp_fb);
-                    for (int j = 0; j < (int)rtcp_fb.size(); j++) {
-                        if (nack_enabled) {
-                            if (rtcp_fb.at(j) == "nack" || rtcp_fb.at(j) == "nack pli") {
-                                payload_type.rtcp_fb_.push_back(rtcp_fb.at(j));
-                            }
-                        }
-                    }
-
-                    // Only choose first match H.264 payload type.
-                    break;
-                }
-
-                backup_payloads.push_back(*iter);
-            }
-
-            // Try my best to pick at least one media payload type.
-            if (local_media_desc.payload_types_.empty() && ! backup_payloads.empty()) {
-                srs_warn("choose backup H.264 payload type=%d", backup_payloads.front().payload_type_);
-                local_media_desc.payload_types_.push_back(backup_payloads.front());
-            }
-
-            if (local_media_desc.payload_types_.empty()) {
-                return srs_error_new(ERROR_RTC_SDP_EXCHANGE, "no found valid H.264 payload type");
-            }
-
-            // TODO: FIXME: Support RRTR?
-            //local_media_desc.payload_types_.back().rtcp_fb_.push_back("rrtr");
-        }
-
-        local_media_desc.mid_ = remote_media_desc.mid_;
-        local_sdp.groups_.push_back(local_media_desc.mid_);
-
-        local_media_desc.port_ = 9;
-        local_media_desc.protos_ = "UDP/TLS/RTP/SAVPF";
-
-        if (remote_media_desc.session_info_.setup_ == "active") {
-            local_media_desc.session_info_.setup_ = "passive";
-        } else if (remote_media_desc.session_info_.setup_ == "passive") {
-            local_media_desc.session_info_.setup_ = "active";
-        } else if (remote_media_desc.session_info_.setup_ == "actpass") {
-            local_media_desc.session_info_.setup_ = "passive";
-        } else {
-            // @see: https://tools.ietf.org/html/rfc4145#section-4.1
-            // The default value of the setup attribute in an offer/answer exchange
-            // is 'active' in the offer and 'passive' in the answer.
-            local_media_desc.session_info_.setup_ = "passive";
-        }
-
-        local_media_desc.rtcp_mux_ = true;
-
-        // For publisher, we are always sendonly.
-        local_media_desc.sendonly_ = false;
-        local_media_desc.recvonly_ = true;
-        local_media_desc.sendrecv_ = false;
-    }
-
-    return err;
-}
-
-SrsGoApiRtcNACK::SrsGoApiRtcNACK(SrsRtcServer* server)
-{
-    server_ = server;
-}
-
-SrsGoApiRtcNACK::~SrsGoApiRtcNACK()
-{
-}
-
-srs_error_t SrsGoApiRtcNACK::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    SrsJsonObject* res = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, res);
-
-    res->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-
-    if ((err = do_serve_http(w, r, res)) != srs_success) {
-        srs_warn("RTC NACK err %s", srs_error_desc(err).c_str());
-        res->set("code", SrsJsonAny::integer(srs_error_code(err)));
-        srs_freep(err);
-    }
-
-    return srs_api_response(w, r, res->dumps());
-}
-
-srs_error_t SrsGoApiRtcNACK::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res)
-{
-    string username = r->query_get("username");
-    string dropv = r->query_get("drop");
-
-    SrsJsonObject* query = SrsJsonAny::object();
-    res->set("query", query);
-
-    query->set("username", SrsJsonAny::str(username.c_str()));
-    query->set("drop", SrsJsonAny::str(dropv.c_str()));
-    query->set("help", SrsJsonAny::str("?username=string&drop=int"));
-
-    int drop = ::atoi(dropv.c_str());
-    if (drop <= 0) {
-        return srs_error_new(ERROR_RTC_INVALID_PARAMS, "invalid drop=%s/%d", dropv.c_str(), drop);
-    }
-
-    SrsRtcSession* session = server_->find_session_by_username(username);
-    if (!session) {
-        return srs_error_new(ERROR_RTC_NO_SESSION, "no session username=%s", username.c_str());
-    }
-
-    session->simulate_nack_drop(drop);
-
-    srs_trace("RTC NACK session peer_id=%s, username=%s, drop=%s/%d", session->peer_id().c_str(),
-        username.c_str(), dropv.c_str(), drop);
-
-    return srs_success;
-}
-#endif
-
 SrsGoApiClients::SrsGoApiClients()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiClients::~SrsGoApiClients()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiClients::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiClients::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
-    
-    SrsStatistic* stat = SrsStatistic::instance();
-    
+
     // path: {pattern}{client_id}
     // e.g. /api/v1/clients/100     pattern= /api/v1/clients/, client_id=100
-    int cid = r->parse_rest_id(entry->pattern);
-    
-    SrsStatisticClient* client = NULL;
-    if (cid >= 0 && (client = stat->find_client(cid)) == NULL) {
+    string client_id = r->parse_rest_id(entry_->pattern);
+
+    SrsStatisticClient *client = NULL;
+    if (!client_id.empty() && (client = stat_->find_client(client_id)) == NULL) {
         return srs_api_response_code(w, r, ERROR_RTMP_CLIENT_NOT_FOUND);
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    obj->set("server", SrsJsonAny::integer(stat->server_id()));
-    
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
     if (r->is_http_get()) {
         if (!client) {
-            SrsJsonArray* data = SrsJsonAny::array();
-            obj->set("clients", data);
-            
-            std::string rstart = r->query_get("start");
-            std::string rcount = r->query_get("count");
-            int start = srs_max(0, atoi(rstart.c_str()));
-            int count = srs_max(10, atoi(rcount.c_str()));
-            if ((err = stat->dumps_clients(data, start, count)) != srs_success) {
+            // Add total count of clients
+            int64_t send_bytes = 0, recv_bytes = 0, nstreams = 0, nclients = 0, total_nclients = 0, nerrs = 0;
+            if ((err = stat_->dumps_metrics(send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
+                return srs_api_response_code(w, r, code);
+            }
+            obj->set("total", SrsJsonAny::integer(nclients));
+
+            // Add clients
+            SrsJsonArray *data = SrsJsonAny::array();
+            obj->set("clients", data);
+
+            int start, count;
+            srs_api_parse_pagination(r, start, count);
+            if ((err = stat_->dumps_clients(data, start, count)) != srs_success) {
+                int code = srs_error_code(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         } else {
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("client", data);;
-            
+            SrsJsonObject *data = SrsJsonAny::object();
+            obj->set("client", data);
+
             if ((err = client->dumps(data)) != srs_success) {
                 int code = srs_error_code(err);
-                srs_error_reset(err);
+                srs_freep(err);
                 return srs_api_response_code(w, r, code);
             }
         }
@@ -1607,781 +941,237 @@ srs_error_t SrsGoApiClients::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessa
         if (!client) {
             return srs_api_response_code(w, r, ERROR_RTMP_CLIENT_NOT_FOUND);
         }
-        
-        client->conn->expire();
-        srs_warn("kickoff client id=%d ok", cid);
+
+        if (client->conn_) {
+            client->conn_->expire();
+            srs_warn("kickoff client id=%s ok", client_id.c_str());
+        } else {
+            srs_error("kickoff client id=%s error", client_id.c_str());
+            return srs_api_response_code(w, r, SRS_CONSTS_HTTP_BadRequest);
+        }
     } else {
         return srs_go_http_error(w, SRS_CONSTS_HTTP_MethodNotAllowed);
     }
-    
+
     return srs_api_response(w, r, obj->dumps());
 }
 
-SrsGoApiRaw::SrsGoApiRaw(SrsServer* svr)
+SrsGoApiForwards::SrsGoApiForwards()
 {
-    server = svr;
-    
-    raw_api = _srs_config->get_raw_api();
-    allow_reload = _srs_config->get_raw_api_allow_reload();
-    allow_query = _srs_config->get_raw_api_allow_query();
-    allow_update = _srs_config->get_raw_api_allow_update();
-    
-    _srs_config->subscribe(this);
+    stat_ = _srs_stat;
+}
+
+SrsGoApiForwards::~SrsGoApiForwards()
+{
+    stat_ = NULL;
+}
+
+srs_error_t SrsGoApiForwards::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
+{
+    srs_error_t err = srs_success;
+
+    // Read-only: a forward is removed by kicking its publisher, see the forward doc.
+    if (!r->is_http_get()) {
+        return srs_go_http_error(w, SRS_CONSTS_HTTP_MethodNotAllowed);
+    }
+
+    // path: {pattern}{forward_id}
+    // e.g. /api/v1/forwards/fwd-x     pattern= /api/v1/forwards/, forward_id=fwd-x
+    string forward_id = r->parse_rest_id(entry_->pattern);
+
+    SrsStatisticForward *forward = NULL;
+    if (!forward_id.empty() && (forward = stat_->find_forward(forward_id)) == NULL) {
+        return srs_api_response_code(w, r, ERROR_RTMP_FORWARD_NOT_FOUND);
+    }
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
+    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    if (!forward) {
+        // Filter by the stream id, e.g. ?stream=vid-xxx, empty for all streams.
+        string stream_id = r->query_get("stream");
+
+        // The total after the filter, before start and count, so the client knows how many pages there are.
+        obj->set("total", SrsJsonAny::integer(stat_->count_forwards(stream_id)));
+
+        SrsJsonArray *data = SrsJsonAny::array();
+        obj->set("forwards", data);
+
+        int start, count;
+        srs_api_parse_pagination(r, start, count);
+        if ((err = stat_->dumps_forwards(data, stream_id, start, count)) != srs_success) {
+            int code = srs_error_code(err);
+            srs_freep(err);
+            return srs_api_response_code(w, r, code);
+        }
+    } else {
+        SrsJsonObject *data = SrsJsonAny::object();
+        obj->set("forward", data);
+
+        if ((err = forward->dumps(data)) != srs_success) {
+            int code = srs_error_code(err);
+            srs_freep(err);
+            return srs_api_response_code(w, r, code);
+        }
+    }
+
+    return srs_api_response(w, r, obj->dumps());
+}
+
+SrsGoApiRaw::SrsGoApiRaw(ISrsSignalHandler *handler)
+{
+    handler_ = handler;
+
+    stat_ = _srs_stat;
+    config_ = _srs_config;
+    reload_status_ = _srs_reload_status;
+}
+
+void SrsGoApiRaw::assemble()
+{
+    config_->subscribe(this);
 }
 
 SrsGoApiRaw::~SrsGoApiRaw()
 {
-    _srs_config->unsubscribe(this);
+    config_->unsubscribe(this);
+
+    stat_ = NULL;
+    config_ = NULL;
+    reload_status_ = NULL;
 }
 
-srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiRaw::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
-    
+
     std::string rpc = r->query_get("rpc");
-    
+
     // the object to return for request.
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    
+
     // for rpc=raw, to query the raw api config for http api.
     if (rpc == "raw") {
         // query global scope.
-        if ((err = _srs_config->raw_to_json(obj)) != srs_success) {
+        if ((err = config_->raw_to_json(obj.get())) != srs_success) {
             int code = srs_error_code(err);
-            srs_error_reset(err);
+            srs_freep(err);
             return srs_api_response_code(w, r, code);
         }
-        
+
         return srs_api_response(w, r, obj->dumps());
     }
-    
-    // whether enabled the HTTP RAW API.
-    if (!raw_api) {
+
+    // whether enabled the HTTP RAW API, read per request so a reload takes effect.
+    if (!config_->get_raw_api()) {
         return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_DISABLED);
     }
-    
+
     //////////////////////////////////////////////////////////////////////////
     // the rpc is required.
-    // the allowd rpc method check.
-    if (rpc.empty() || (rpc != "reload" && rpc != "query" && rpc != "raw" && rpc != "update")) {
+    // the allowed rpc method check.
+    if (rpc.empty() || (rpc != "reload" && rpc != "reload-fetch" && rpc != "reopen-log")) {
         return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW);
     }
-    
+
     // for rpc=reload, trigger the server to reload the config.
     if (rpc == "reload") {
-        if (!allow_reload) {
+        if (!config_->get_raw_api_allow_reload()) {
             return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_DISABLED);
         }
-        
-        server->on_signal(SRS_SIGNAL_RELOAD);
+
+        handler_->on_signal(SRS_SIGNAL_RELOAD);
+        return srs_api_response_code(w, r, ERROR_SUCCESS);
+    } else if (rpc == "reload-fetch") {
+        SrsJsonObject *data = SrsJsonAny::object();
+        obj->set("data", data);
+
+        data->set("err", SrsJsonAny::integer(srs_error_code(reload_status_->error())));
+        data->set("msg", SrsJsonAny::str(srs_error_summary(reload_status_->error()).c_str()));
+        data->set("state", SrsJsonAny::integer(reload_status_->state()));
+        data->set("rid", SrsJsonAny::str(reload_status_->id().c_str()));
+
+        return srs_api_response(w, r, obj->dumps());
+    } else if (rpc == "reopen-log") {
+        // Windows has no SIGUSR1, so a log rotation asks for the reopen here. It changes no config, so it
+        // needs no allow_reload.
+        handler_->on_signal(SRS_SIGNAL_REOPEN_LOG);
         return srs_api_response_code(w, r, ERROR_SUCCESS);
     }
-    
-    // for rpc=query, to get the configs of server.
-    //      @param scope the scope to query for config, it can be:
-    //              global, the configs belongs to the root, donot includes any sub directives.
-    //              minimal, the minimal summary of server, for preview stream to got the port serving.
-    //              vhost, the configs for specified vhost by @param vhost.
-    //      @param vhost the vhost name for @param scope is vhost to query config.
-    //              for the default vhost, must be __defaultVhost__
-    if (rpc == "query") {
-        if (!allow_query) {
-            return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_DISABLED);
-        }
-        
-        std::string scope = r->query_get("scope");
-        std::string vhost = r->query_get("vhost");
-        if (scope.empty() || (scope != "global" && scope != "vhost" && scope != "minimal")) {
-            return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-        }
-        
-        if (scope == "vhost") {
-            // query vhost scope.
-            if (vhost.empty()) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            SrsConfDirective* root = _srs_config->get_root();
-            SrsConfDirective* conf = root->get("vhost", vhost);
-            if (!conf) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("vhost", data);
-            if ((err = _srs_config->vhost_to_json(conf, data)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "minimal") {
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("minimal", data);
-            
-            // query minimal scope.
-            if ((err = _srs_config->minimal_to_json(data)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else {
-            SrsJsonObject* data = SrsJsonAny::object();
-            obj->set("global", data);
-            
-            // query global scope.
-            if ((err = _srs_config->global_to_json(data)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        }
-        
-        return srs_api_response(w, r, obj->dumps());
-    }
-    
-    // for rpc=update, to update the configs of server.
-    //      @scope the scope to update for config.
-    //      @value the updated value for scope.
-    //      @param the extra param for scope.
-    //      @data the extra data for scope.
-    // possible updates:
-    //      @scope          @value              value-description
-    //      listen          1935,1936           the port list.
-    //      pid             ./objs/srs.pid      the pid file of srs.
-    //      chunk_size      60000               the global RTMP chunk_size.
-    //      ff_log_dir      ./objs              the dir for ffmpeg log.
-    //      srs_log_tank    file                the tank to log, file or console.
-    //      srs_log_level   trace               the level of log, verbose, info, trace, warn, error.
-    //      srs_log_file    ./objs/srs.log      the log file when tank is file.
-    //      max_connections 1000                the max connections of srs.
-    //      utc_time        false               whether enable utc time.
-    //      pithy_print_ms  10000               the pithy print interval in ms.
-    // vhost specified updates:
-    //      @scope          @value              @param              @data               description
-    //      vhost           ossrs.net           create              -                   create vhost ossrs.net
-    //      vhost           ossrs.net           update              new.ossrs.net       the new name to update vhost
-    // dvr specified updates:
-    //      @scope          @value              @param              @data               description
-    //      dvr             ossrs.net           enable              live/livestream     enable the dvr of stream
-    //      dvr             ossrs.net           disable             live/livestream     disable the dvr of stream
-    if (rpc == "update") {
-        if (!allow_update) {
-            return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_DISABLED);
-        }
-        
-        std::string scope = r->query_get("scope");
-        std::string value = r->query_get("value");
-        if (scope.empty()) {
-            return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-        }
-        if (scope != "listen" && scope != "pid" && scope != "chunk_size"
-            && scope != "ff_log_dir" && scope != "srs_log_tank" && scope != "srs_log_level"
-            && scope != "srs_log_file" && scope != "max_connections" && scope != "utc_time"
-            && scope != "pithy_print_ms" && scope != "vhost" && scope != "dvr"
-            ) {
-            return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-        }
-        
-        bool applied = false;
-        string extra = "";
-        if (scope == "listen") {
-            vector<string> eps = srs_string_split(value, ",");
-            
-            bool invalid = eps.empty();
-            for (int i = 0; i < (int)eps.size(); i++) {
-                string ep = eps.at(i);
-                int port = ::atoi(ep.c_str());
-                if (port <= 2 || port >= 65535) {
-                    invalid = true;
-                    break;
-                }
-            }
-            if (invalid) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_listen(eps, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "pid") {
-            if (value.empty() || !srs_string_starts_with(value, "./", "/tmp/", "/var/") || !srs_string_ends_with(value, ".pid")) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_pid(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "chunk_size") {
-            int csv = ::atoi(value.c_str());
-            if (csv < 128 || csv > 65535 || !srs_is_digit_number(value)) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_chunk_size(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "ff_log_dir") {
-            if (value.empty() || (value != "/dev/null" && !srs_string_starts_with(value, "./", "/tmp/", "/var/"))) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_ff_log_dir(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "srs_log_tank") {
-            if (value.empty() || (value != "file" && value != "console")) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_srs_log_tank(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "srs_log_level") {
-            if (value != "verbose" && value != "info" && value != "trace" && value != "warn" && value != "error") {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_srs_log_level(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "srs_log_file") {
-            if (value.empty() || !srs_string_starts_with(value, "./", "/tmp/", "/var/") || !srs_string_ends_with(value, ".log")) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_srs_log_file(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "max_connections") {
-            int mcv = ::atoi(value.c_str());
-            if (mcv < 10 || mcv > 65535 || !srs_is_digit_number(value)) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_max_connections(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "utc_time") {
-            if (!srs_is_boolean(value)) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_utc_time(srs_config_bool2switch(value), applied)) != srs_success) {
-                return srs_api_response_code(w, r, srs_error_wrap(err, "raw api update utc_time=%s", value.c_str()));
-            }
-        } else if (scope == "pithy_print_ms") {
-            int ppmv = ::atoi(value.c_str());
-            if (ppmv < 100 || ppmv > 300000 || !srs_is_digit_number(value)) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-            }
-            
-            if ((err = _srs_config->raw_set_pithy_print_ms(value, applied)) != srs_success) {
-                int code = srs_error_code(err);
-                srs_error_reset(err);
-                return srs_api_response_code(w, r, code);
-            }
-        } else if (scope == "vhost") {
-            std::string param = r->query_get("param");
-            std::string data = r->query_get("data");
-            if (param != "create" && param != "update" && param != "delete" && param != "disable" && param != "enable") {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-            }
-            extra += " " + param;
-            
-            if (param == "create") {
-                // when create, the vhost must not exists.
-                if (param.empty() || _srs_config->get_vhost(value, false)) {
-                    return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-                }
-                
-                if ((err = _srs_config->raw_create_vhost(value, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else if (param == "update") {
-                extra += " to " + data;
-                
-                // when update, the vhost must exists and disabled.
-                SrsConfDirective* vhost = _srs_config->get_vhost(value, false);
-                if (data.empty() || data == value || param.empty() || !vhost || _srs_config->get_vhost_enabled(vhost)) {
-                    return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-                }
-                
-                if ((err = _srs_config->raw_update_vhost(value, data, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else if (param == "delete") {
-                // when delete, the vhost must exists and disabled.
-                SrsConfDirective* vhost = _srs_config->get_vhost(value, false);
-                if (param.empty() || !vhost || _srs_config->get_vhost_enabled(vhost)) {
-                    return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-                }
-                
-                if ((err = _srs_config->raw_delete_vhost(value, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else if (param == "disable") {
-                // when disable, the vhost must exists and enabled.
-                SrsConfDirective* vhost = _srs_config->get_vhost(value, false);
-                if (param.empty() || !vhost || !_srs_config->get_vhost_enabled(vhost)) {
-                    return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-                }
-                
-                if ((err = _srs_config->raw_disable_vhost(value, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else if (param == "enable") {
-                // when enable, the vhost must exists and disabled.
-                SrsConfDirective* vhost = _srs_config->get_vhost(value, false);
-                if (param.empty() || !vhost || _srs_config->get_vhost_enabled(vhost)) {
-                    return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_PARAMS);
-                }
-                
-                if ((err = _srs_config->raw_enable_vhost(value, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else {
-                // TODO: support other param.
-            }
-        } else if (scope == "dvr") {
-            std::string action = r->query_get("param");
-            std::string stream = r->query_get("data");
-            extra += "/" + stream + " to " + action;
-            
-            if (action != "enable" && action != "disable") {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-            }
-            
-            if (!_srs_config->get_dvr_enabled(value)) {
-                return srs_api_response_code(w, r, ERROR_SYSTEM_CONFIG_RAW_NOT_ALLOWED);
-            }
-            
-            if (action == "enable") {
-                if ((err = _srs_config->raw_enable_dvr(value, stream, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            } else {
-                if ((err = _srs_config->raw_disable_dvr(value, stream, applied)) != srs_success) {
-                    int code = srs_error_code(err);
-                    srs_error_reset(err);
-                    return srs_api_response_code(w, r, code);
-                }
-            }
-        } else {
-            // TODO: support other scope.
-        }
-        
-        // whether the config applied.
-        if (applied) {
-            server->on_signal(SRS_SIGNAL_PERSISTENCE_CONFIG);
-            srs_trace("raw api update %s=%s%s ok.", scope.c_str(), value.c_str(), extra.c_str());
-        } else {
-            srs_warn("raw api update not applied %s=%s%s.", scope.c_str(), value.c_str(), extra.c_str());
-        }
-        
-        return srs_api_response(w, r, obj->dumps());
-    }
-    
-    return err;
-}
 
-srs_error_t SrsGoApiRaw::on_reload_http_api_raw_api()
-{
-    raw_api = _srs_config->get_raw_api();
-    allow_reload = _srs_config->get_raw_api_allow_reload();
-    allow_query = _srs_config->get_raw_api_allow_query();
-    allow_update = _srs_config->get_raw_api_allow_update();
-    
-    return srs_success;
+    return err;
 }
 
 SrsGoApiClusters::SrsGoApiClusters()
 {
+    stat_ = _srs_stat;
+    coworkers_ = _srs_coworkers;
 }
 
 SrsGoApiClusters::~SrsGoApiClusters()
 {
+    stat_ = NULL;
+    coworkers_ = NULL;
 }
 
-srs_error_t SrsGoApiClusters::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiClusters::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    SrsJsonObject* data = SrsJsonAny::object();
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
-    
+
     string ip = r->query_get("ip");
     string vhost = r->query_get("vhost");
     string app = r->query_get("app");
     string stream = r->query_get("stream");
     string coworker = r->query_get("coworker");
     data->set("query", SrsJsonAny::object()
-              ->set("ip", SrsJsonAny::str(ip.c_str()))
-              ->set("vhost", SrsJsonAny::str(vhost.c_str()))
-              ->set("app", SrsJsonAny::str(app.c_str()))
-              ->set("stream", SrsJsonAny::str(stream.c_str())));
-    
-    SrsCoWorkers* coworkers = SrsCoWorkers::instance();
-    data->set("origin", coworkers->dumps(vhost, coworker, app, stream));
-    
-    return srs_api_response(w, r, obj->dumps());
-}
+                           ->set("ip", SrsJsonAny::str(ip.c_str()))
+                           ->set("vhost", SrsJsonAny::str(vhost.c_str()))
+                           ->set("app", SrsJsonAny::str(app.c_str()))
+                           ->set("stream", SrsJsonAny::str(stream.c_str())));
 
-SrsGoApiPerf::SrsGoApiPerf()
-{
-}
-
-SrsGoApiPerf::~SrsGoApiPerf()
-{
-}
-
-srs_error_t SrsGoApiPerf::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-
-    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    SrsJsonObject* data = SrsJsonAny::object();
-    obj->set("data", data);
-
-    SrsStatistic* stat = SrsStatistic::instance();
-
-    string target = r->query_get("target");
-    string reset = r->query_get("reset");
-    srs_trace("query target=%s, reset=%s, rtc_stat_enabled=%d", target.c_str(), reset.c_str(),
-        _srs_config->get_rtc_server_perf_stat());
-
-    if (true) {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("query", p);
-
-        p->set("target", SrsJsonAny::str(target.c_str()));
-        p->set("reset", SrsJsonAny::str(reset.c_str()));
-        p->set("help", SrsJsonAny::str("?target=avframes|rtc|rtp|gso|writev_iovs|sendmmsg|bytes|dropped"));
-        p->set("help2", SrsJsonAny::str("?reset=all"));
-    }
-
-    if (!reset.empty()) {
-        stat->reset_perf();
-        return srs_api_response(w, r, obj->dumps());
-    }
-
-    if (target.empty() || target == "avframes") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("avframes", p);
-        if ((err = stat->dumps_perf_msgs(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "rtc") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("rtc", p);
-        if ((err = stat->dumps_perf_rtc_packets(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "rtp") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("rtp", p);
-        if ((err = stat->dumps_perf_rtp_packets(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "gso") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("gso", p);
-        if ((err = stat->dumps_perf_gso(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "sendmmsg") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("sendmmsg", p);
-        if ((err = stat->dumps_perf_sendmmsg(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "writev_iovs") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("writev_iovs", p);
-        if ((err = stat->dumps_perf_writev_iovs(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "bytes") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("bytes", p);
-        if ((err = stat->dumps_perf_bytes(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
-
-    if (target.empty() || target == "dropped") {
-        SrsJsonObject* p = SrsJsonAny::object();
-        data->set("dropped", p);
-        if ((err = stat->dumps_perf_dropped(p)) != srs_success) {
-            int code = srs_error_code(err); srs_error_reset(err);
-            return srs_api_response_code(w, r, code);
-        }
-    }
+    data->set("origin", coworkers_->dumps(vhost, coworker, app, stream));
 
     return srs_api_response(w, r, obj->dumps());
 }
 
 SrsGoApiError::SrsGoApiError()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiError::~SrsGoApiError()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiError::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiError::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     return srs_api_response_code(w, r, 100);
 }
-
-#ifdef SRS_GB28181
-SrsGoApiGb28181::SrsGoApiGb28181()
-{
-}
-
-SrsGoApiGb28181::~SrsGoApiGb28181()
-{
-}
-
-srs_error_t SrsGoApiGb28181::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    if ((err = do_serve_http(w, r)) != srs_success) {
-        srs_warn("Server GB28181 err %s", srs_error_desc(err).c_str());
-        int code = srs_error_code(err); srs_error_reset(err);
-        return srs_api_response_code(w, r, code);
-    }
-
-    return err;
-}
-
-srs_error_t SrsGoApiGb28181::do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
-{
-    srs_error_t err = srs_success;
-
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
-    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    SrsJsonObject* data = SrsJsonAny::object();
-    obj->set("data", data);
-    
-    string id = r->query_get("id");
-    string action = r->query_get("action");
-    string vhost = r->query_get("vhost");
-    string app = r->query_get("app");
-    string stream = r->query_get("stream");
-    //fixed, random
-    string port_mode = r->query_get("port_mode");
-   
-    if (!_srs_gb28181) {
-        return srs_error_new(ERROR_GB28181_SERVER_NOT_RUN, "no gb28181 engine");
-    }
-
-    if(action == "create_channel"){
-        if (id.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id");
-        }
-
-        SrsGb28181StreamChannel channel;
-        channel.set_channel_id(id);
-        channel.set_app(app);
-        channel.set_stream(stream);
-        channel.set_port_mode(port_mode);
-
-        if ((err = _srs_gb28181->create_stream_channel(&channel)) != srs_success) {
-            return srs_error_wrap(err, "create stream channel");
-        }
-
-        data->set("query", SrsJsonAny::object()
-          ->set("id", SrsJsonAny::str(channel.get_channel_id().c_str()))
-          ->set("ip", SrsJsonAny::str(channel.get_ip().c_str()))
-          ->set("rtmp_port", SrsJsonAny::integer(channel.get_rtmp_port()))
-          ->set("app", SrsJsonAny::str(channel.get_app().c_str()))
-          ->set("stream", SrsJsonAny::str(channel.get_stream().c_str()))
-          ->set("rtp_port", SrsJsonAny::integer(channel.get_rtp_port()))
-          ->set("ssrc", SrsJsonAny::integer(channel.get_ssrc())));
-        return srs_api_response(w, r, obj->dumps());
-
-    } else if(action == "delete_channel"){
-       if (id.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id");
-        }
-
-        if ((err = _srs_gb28181->delete_stream_channel(id)) != srs_success) {
-            return srs_error_wrap(err, "delete stream channel");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "query_channel") {
-        SrsJsonArray* arr = SrsJsonAny::array();
-        data->set("channels", arr);
-
-        if ((err = _srs_gb28181->query_stream_channel(id, arr)) != srs_success) {
-            return srs_error_wrap(err, "query stream channel");
-        }
-
-        return srs_api_response(w, r, obj->dumps());
-    } else if(action == "sip_invite"){
-        string chid = r->query_get("chid");
-        if (id.empty() || chid.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id or chid");
-        }
-
-        string ssrc = r->query_get("ssrc");
-        string rtp_port = r->query_get("rtp_port");
-        string ip = r->query_get("ip");
-
-        int _port = strtoul(rtp_port.c_str(), NULL, 10);
-        uint32_t _ssrc = (uint32_t)(strtoul(ssrc.c_str(), NULL, 10));
-
-        if ((err = _srs_gb28181->notify_sip_invite(id, ip, _port, _ssrc, chid)) != srs_success) {
-            return srs_error_wrap(err, "notify sip invite");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_bye"){
-        string chid = r->query_get("chid");
-        if (id.empty() || chid.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id or chid");
-        }
-
-        if ((err = _srs_gb28181->notify_sip_bye(id, chid)) != srs_success) {
-            return srs_error_wrap(err, "notify sip bye");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_ptz"){
-        string chid = r->query_get("chid");
-        string ptzcmd = r->query_get("ptzcmd");
-        string speed = r->query_get("speed");
-        string priority = r->query_get("priority");
-        if (id.empty() || chid.empty() || ptzcmd.empty() || speed.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id or chid or ptzcmd or speed");
-        }
-
-        uint8_t _speed = (uint8_t)(strtoul(speed.c_str(), NULL, 10));
-        int _priority = (int)(strtoul(priority.c_str(), NULL, 10));
-
-        if ((err = _srs_gb28181->notify_sip_ptz(id, chid, ptzcmd, _speed, _priority)) != srs_success) {
-            return srs_error_wrap(err, "notify sip ptz");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_raw_data"){
-        if (id.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id");
-        }
-
-        std::string body;
-        r->body_read_all(body);
-
-        if ((err = _srs_gb28181->notify_sip_raw_data(id, body)) != srs_success) {
-            return srs_error_wrap(err, "notify sip raw data");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_unregister"){
-        if (id.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id");
-        }
-
-        if ((err = _srs_gb28181->notify_sip_unregister(id)) != srs_success) {
-            return srs_error_wrap(err, "notify sip unregister");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_query_catalog"){
-        if (id.empty()){
-            return srs_error_new(ERROR_GB28181_VALUE_EMPTY, "no id");
-        }
-
-        if ((err = _srs_gb28181->notify_sip_query_catalog(id)) != srs_success) {
-            return srs_error_wrap(err, "notify sip query catelog");
-        }
-
-        return srs_api_response_code(w, r, 0);
-    } else if(action == "sip_query_session"){
-        SrsJsonArray* arr = SrsJsonAny::array();
-        data->set("sessions", arr);
-
-        if ((err = _srs_gb28181->query_sip_session(id, arr)) != srs_success) {
-            return srs_error_wrap(err, "notify sip session");
-        }
-
-        return srs_api_response(w, r, obj->dumps());
-    } else {
-        return srs_error_new(ERROR_GB28181_ACTION_INVALID, "action %s", action.c_str());
-    }
-}
-#endif
 
 #ifdef SRS_GPERF
 #include <gperftools/malloc_extension.h>
 
 SrsGoApiTcmalloc::SrsGoApiTcmalloc()
 {
+    stat_ = _srs_stat;
 }
 
 SrsGoApiTcmalloc::~SrsGoApiTcmalloc()
 {
+    stat_ = NULL;
 }
 
-srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
 
@@ -2393,7 +1183,7 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
         MallocExtension::instance()->GetStats(buffer, sizeof(buffer));
 
         string data(buffer);
-        if ((err = w->write((char*)data.data(), (int)data.length())) != srs_success) {
+        if ((err = w->write((char *)data.data(), (int)data.length())) != srs_success) {
             return srs_error_wrap(err, "write");
         }
 
@@ -2401,15 +1191,14 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     }
 
     // By default, response the json style response.
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
 
     obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
-    SrsJsonObject* data = SrsJsonAny::object();
+    SrsJsonObject *data = SrsJsonAny::object();
     obj->set("data", data);
 
     if (true) {
-        SrsJsonObject* p = SrsJsonAny::object();
+        SrsJsonObject *p = SrsJsonAny::object();
         data->set("query", p);
 
         p->set("page", SrsJsonAny::str(page.c_str()));
@@ -2422,7 +1211,7 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     data->set("release_rate", SrsJsonAny::number(MallocExtension::instance()->GetMemoryReleaseRate()));
 
     if (true) {
-        SrsJsonObject* p = SrsJsonAny::object();
+        SrsJsonObject *p = SrsJsonAny::object();
         data->set("generic", p);
 
         MallocExtension::instance()->GetNumericProperty("generic.current_allocated_bytes", &value);
@@ -2433,7 +1222,7 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
     }
 
     if (true) {
-        SrsJsonObject* p = SrsJsonAny::object();
+        SrsJsonObject *p = SrsJsonAny::object();
         data->set("tcmalloc", p);
 
         MallocExtension::instance()->GetNumericProperty("tcmalloc.pageheap_free_bytes", &value);
@@ -2456,126 +1245,297 @@ srs_error_t SrsGoApiTcmalloc::serve_http(ISrsHttpResponseWriter* w, ISrsHttpMess
 }
 #endif
 
-SrsHttpApi::SrsHttpApi(IConnectionManager* cm, srs_netfd_t fd, SrsHttpServeMux* m, string cip)
-    : SrsConnection(cm, fd, cip)
+#ifdef SRS_VALGRIND
+SrsGoApiValgrind::SrsGoApiValgrind()
 {
-    mux = m;
-    cors = new SrsHttpCorsMux();
-    parser = new SrsHttpParser();
-    
-    _srs_config->subscribe(this);
+    trd_ = NULL;
+
+    stat_ = _srs_stat;
 }
 
-SrsHttpApi::~SrsHttpApi()
+SrsGoApiValgrind::~SrsGoApiValgrind()
 {
-    srs_freep(parser);
-    srs_freep(cors);
-    
-    _srs_config->unsubscribe(this);
+    srs_freep(trd_);
+
+    stat_ = NULL;
 }
 
-void SrsHttpApi::remark(int64_t* in, int64_t* out)
-{
-    // TODO: FIXME: implements it
-}
-
-srs_error_t SrsHttpApi::do_cycle()
+srs_error_t SrsGoApiValgrind::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
 {
     srs_error_t err = srs_success;
-    
-    srs_trace("API server client, ip=%s", ip.c_str());
-    
-    // initialize parser
-    if ((err = parser->initialize(HTTP_REQUEST, true)) != srs_success) {
-        return srs_error_wrap(err, "init parser");
+
+    string check = r->query_get("check");
+    srs_trace("query check=%s", check.c_str());
+
+    // Must be full|added|changed|new|quick, set to full for other values.
+    if (check != "full" && check != "added" && check != "changed" && check != "new" && check != "quick") {
+        srs_warn("force set check=%s to full", check.c_str());
+        check = "full";
     }
-    
-    // set the recv timeout, for some clients never disconnect the connection.
-    // @see https://github.com/ossrs/srs/issues/398
-    skt->set_recv_timeout(SRS_HTTP_RECV_TIMEOUT);
-    
-    // initialize the cors, which will proxy to mux.
-    bool crossdomain_enabled = _srs_config->get_http_api_crossdomain();
-    if ((err = cors->initialize(mux, crossdomain_enabled)) != srs_success) {
-        return srs_error_wrap(err, "init cors");
+
+    // Check if 'new' leak check is supported in current Valgrind version
+    if (check == "new") {
+#if !defined(VALGRIND_DO_NEW_LEAK_CHECK)
+        return srs_error_new(ERROR_NOT_SUPPORTED,
+                             "valgrind?check=new requires Valgrind 3.21+, current version is %d.%d",
+                             __VALGRIND_MAJOR__, __VALGRIND_MINOR__);
+#endif
     }
-    
-    // process http messages.
-    while ((err = trd->pull()) == srs_success) {
-        ISrsHttpMessage* req = NULL;
-        
-        // get a http message
-        if ((err = parser->parse_message(skt, &req)) != srs_success) {
-            // For HTTP timeout, we think it's ok.
-            if (srs_error_code(err) == ERROR_SOCKET_TIMEOUT) {
-                srs_freep(err);
-                return srs_error_wrap(srs_success, "http api timeout");
-            }
-            return srs_error_wrap(err, "parse message");
-        }
-        
-        // if SUCCESS, always NOT-NULL.
-        // always free it in this scope.
-        srs_assert(req);
-        SrsAutoFree(ISrsHttpMessage, req);
-        
-        // Attach owner connection to message.
-        SrsHttpMessage* hreq = (SrsHttpMessage*)req;
-        hreq->set_connection(this);
-        
-        // ok, handle http request.
-        SrsHttpResponseWriter writer(skt);
-        if ((err = process_request(&writer, req)) != srs_success) {
-            return srs_error_wrap(err, "process request");
-        }
-        
-        // read all rest bytes in request body.
-        char buf[SRS_HTTP_READ_CACHE_BYTES];
-        ISrsHttpResponseReader* br = req->body_reader();
-        while (!br->eof()) {
-            if ((err = br->read(buf, SRS_HTTP_READ_CACHE_BYTES, NULL)) != srs_success) {
-                return srs_error_wrap(err, "read response");
-            }
-        }
-        
-        // donot keep alive, disconnect it.
-        // @see https://github.com/ossrs/srs/issues/399
-        if (!req->is_keep_alive()) {
-            break;
+
+    if (!trd_) {
+        trd_ = new SrsSTCoroutine("valgrind", this, _srs_context->get_id());
+        if ((err = trd_->start()) != srs_success) {
+            return srs_error_wrap(err, "start");
         }
     }
-    
-    return err;
+
+    // By default, response the json style response.
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
+    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
+
+    SrsJsonObject *res = SrsJsonAny::object();
+    res->set("check", SrsJsonAny::str(check.c_str()));
+    res->set("help", SrsJsonAny::str("?check=full|added|changed|new|quick"));
+    res->set("see", SrsJsonAny::str("https://valgrind.org/docs/manual/mc-manual.html"));
+    obj->set("data", res);
+
+    // Does a memory check later.
+    if (check == "full") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_LEAK_CHECK"));
+    } else if (check == "quick") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_QUICK_LEAK_CHECK"));
+    } else if (check == "added") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_ADDED_LEAK_CHECK"));
+    } else if (check == "changed") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_CHANGED_LEAK_CHECK"));
+    } else if (check == "new") {
+        res->set("call", SrsJsonAny::str("VALGRIND_DO_NEW_LEAK_CHECK"));
+    }
+    task_ = check;
+
+    return srs_api_response(w, r, obj->dumps());
 }
 
-srs_error_t SrsHttpApi::process_request(ISrsHttpResponseWriter* w, ISrsHttpMessage* r)
+srs_error_t SrsGoApiValgrind::cycle()
 {
     srs_error_t err = srs_success;
-    
-    SrsHttpMessage* hm = dynamic_cast<SrsHttpMessage*>(r);
-    srs_assert(hm);
-    
-    srs_trace("HTTP API %s %s, content-length=%" PRId64 ", chunked=%d/%d",
-        r->method_str().c_str(), r->url().c_str(), r->content_length(),
-        hm->is_chunked(), hm->is_infinite_chunked());
-    
-    // use cors server mux to serve http request, which will proxy to mux.
-    if ((err = cors->serve_http(w, r)) != srs_success) {
-        return srs_error_wrap(err, "mux serve");
+
+    while (true) {
+        if ((err = trd_->pull()) != srs_success) {
+            return srs_error_wrap(err, "pull");
+        }
+
+        std::string check = task_;
+        task_ = "";
+
+        if (!check.empty()) {
+            srs_trace("do memory check=%s", check.c_str());
+        }
+
+        if (check == "full") {
+            VALGRIND_DO_LEAK_CHECK;
+        } else if (check == "quick") {
+            VALGRIND_DO_QUICK_LEAK_CHECK;
+        } else if (check == "added") {
+            VALGRIND_DO_ADDED_LEAK_CHECK;
+        } else if (check == "changed") {
+            VALGRIND_DO_CHANGED_LEAK_CHECK;
+        } else if (check == "new") {
+            VALGRIND_DO_NEW_LEAK_CHECK;
+        }
+
+        srs_usleep(3 * SRS_UTIME_SECONDS);
     }
-    
+
     return err;
 }
+#endif
 
-srs_error_t SrsHttpApi::on_reload_http_api_crossdomain()
+#ifdef SRS_SIGNAL_API
+SrsGoApiSignal::SrsGoApiSignal()
 {
-    srs_error_t err = srs_success;
-    
-    bool crossdomain_enabled = _srs_config->get_http_api_crossdomain();
-    if ((err = cors->initialize(mux, crossdomain_enabled)) != srs_success) {
-        return srs_error_wrap(err, "reload");
-    }
-    
-    return err;
+    stat_ = _srs_stat;
 }
 
+SrsGoApiSignal::~SrsGoApiSignal()
+{
+    stat_ = NULL;
+}
+
+srs_error_t SrsGoApiSignal::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
+{
+    std::string signal = r->query_get("signo");
+    srs_trace("query signo=%s", signal.c_str());
+
+    int signo = SIGINT;
+    if (signal == "SIGHUP") {
+        signo = SRS_SIGNAL_RELOAD;
+    } else if (signal == "SIGUSR1") {
+        signo = SRS_SIGNAL_REOPEN_LOG;
+    } else if (signal == "SIGUSR2") {
+        signo = SRS_SIGNAL_UPGRADE;
+    } else if (signal == "SIGTERM") {
+        signo = SRS_SIGNAL_FAST_QUIT;
+    } else if (signal == "SIGQUIT") {
+        signo = SRS_SIGNAL_GRACEFULLY_QUIT;
+    } else if (signal == "SIGABRT") {
+        signo = SRS_SIGNAL_ASSERT_ABORT;
+    }
+
+    _srs_server->on_signal(signo);
+
+    // By default, response the json style response.
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
+    obj->set("code", SrsJsonAny::integer(ERROR_SUCCESS));
+
+    SrsJsonObject *res = SrsJsonAny::object();
+    res->set("signal", SrsJsonAny::str(signal.c_str()));
+    res->set("help", SrsJsonAny::str("?signo=SIGHUP|SIGUSR1|SIGUSR2|SIGTERM|SIGQUIT|SIGABRT|SIGINT"));
+    res->set("signo", SrsJsonAny::integer(signo));
+    obj->set("data", res);
+
+    return srs_api_response(w, r, obj->dumps());
+}
+#endif
+
+SrsGoApiMetrics::SrsGoApiMetrics()
+{
+    stat_ = _srs_stat;
+    config_ = _srs_config;
+}
+
+void SrsGoApiMetrics::assemble()
+{
+    enabled_ = config_->get_exporter_enabled();
+    label_ = config_->get_exporter_label();
+    tag_ = config_->get_exporter_tag();
+}
+
+SrsGoApiMetrics::~SrsGoApiMetrics()
+{
+    stat_ = NULL;
+    config_ = NULL;
+}
+
+srs_error_t SrsGoApiMetrics::serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r)
+{
+    // whether enabled the HTTP Metrics API.
+    if (!enabled_) {
+        return srs_api_response_code(w, r, ERROR_EXPORTER_DISABLED);
+    }
+
+    /*
+     * node_uname gauge
+     * build_info gauge
+     * cpu gauge
+     * memory gauge
+     * send_bytes_total counter
+     * receive_bytes_total counter
+     * streams gauge
+     * clients gauge
+     * clients_total counter
+     * error counter
+     */
+
+    std::stringstream ss;
+
+    // Get system info
+    SrsProtocolUtility utility;
+    utsname *system_info = utility.system_uname();
+    ss << "# HELP srs_node_uname_info Labeled system information as provided by the uname system call.\n"
+       << "# TYPE srs_node_uname_info gauge\n"
+       << "srs_node_uname_info{"
+       << "sysname=\"" << srs_api_metrics_label_escape(system_info->sysname) << "\","
+       << "nodename=\"" << srs_api_metrics_label_escape(system_info->nodename) << "\","
+       << "release=\"" << srs_api_metrics_label_escape(system_info->release) << "\","
+       << "version=\"" << srs_api_metrics_label_escape(system_info->version) << "\","
+       << "machine=\"" << srs_api_metrics_label_escape(system_info->machine) << "\""
+       << "} 1\n";
+
+    // Build info from Config.
+    ss << "# HELP srs_build_info A metric with a constant '1' value labeled by build_date, version from which SRS was built.\n"
+       << "# TYPE srs_build_info gauge\n"
+       << "srs_build_info{"
+       << "server=\"" << srs_api_metrics_label_escape(stat_->server_id()) << "\","
+       << "service=\"" << srs_api_metrics_label_escape(stat_->service_id()) << "\","
+       << "pid=\"" << stat_->service_pid() << "\","
+       << "build_date=\"" << SRS_BUILD_DATE << "\","
+       << "major=\"" << VERSION_MAJOR << "\","
+       << "version=\"" << RTMP_SIG_SRS_VERSION << "\","
+       << "code=\"" << RTMP_SIG_SRS_CODE << "\"";
+    if (!label_.empty())
+        ss << ",label=\"" << srs_api_metrics_label_escape(label_) << "\"";
+    if (!tag_.empty())
+        ss << ",tag=\"" << srs_api_metrics_label_escape(tag_) << "\"";
+    ss << "} 1\n";
+
+    // Get ProcSelfStat
+    SrsProcSelfStat *u = srs_get_self_proc_stat();
+
+    // The cpu of proc used.
+    ss << "# HELP srs_cpu_percent SRS cpu used percent.\n"
+       << "# TYPE srs_cpu_percent gauge\n"
+       << "srs_cpu_percent "
+       << u->percent_ * 100
+       << "\n";
+
+    // The memory of proc used.(MBytes)
+    int memory = (int)(u->rss_ * 4);
+    ss << "# HELP srs_memory SRS memory used.\n"
+       << "# TYPE srs_memory gauge\n"
+       << "srs_memory "
+       << memory
+       << "\n";
+
+    // Dump metrics by statistic.
+    int64_t send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs;
+    stat_->dumps_metrics(send_bytes, recv_bytes, nstreams, nclients, total_nclients, nerrs);
+
+    // The total of bytes sent.
+    ss << "# HELP srs_send_bytes_total SRS total sent bytes.\n"
+       << "# TYPE srs_send_bytes_total counter\n"
+       << "srs_send_bytes_total "
+       << send_bytes
+       << "\n";
+
+    // The total of bytes received.
+    ss << "# HELP srs_receive_bytes_total SRS total received bytes.\n"
+       << "# TYPE srs_receive_bytes_total counter\n"
+       << "srs_receive_bytes_total "
+       << recv_bytes
+       << "\n";
+
+    // Current number of online streams.
+    ss << "# HELP srs_streams The number of SRS concurrent streams.\n"
+       << "# TYPE srs_streams gauge\n"
+       << "srs_streams "
+       << nstreams
+       << "\n";
+
+    // Current number of online clients.
+    ss << "# HELP srs_clients The number of SRS concurrent clients.\n"
+       << "# TYPE srs_clients gauge\n"
+       << "srs_clients "
+       << nclients
+       << "\n";
+
+    // The total of clients connections.
+    ss << "# HELP srs_clients_total The total counts of SRS clients.\n"
+       << "# TYPE srs_clients_total counter\n"
+       << "srs_clients_total "
+       << total_nclients
+       << "\n";
+
+    // The total of clients errors.
+    ss << "# HELP srs_clients_errs_total The total errors of SRS clients.\n"
+       << "# TYPE srs_clients_errs_total counter\n"
+       << "srs_clients_errs_total "
+       << nerrs
+       << "\n";
+
+    w->header()->set_content_type("text/plain; charset=utf-8");
+
+    return srs_api_response(w, r, ss.str());
+}

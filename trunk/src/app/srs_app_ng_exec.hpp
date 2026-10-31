@@ -1,67 +1,78 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_NG_EXEC_HPP
 #define SRS_APP_NG_EXEC_HPP
 
 #include <srs_core.hpp>
 
-#include <vector>
 #include <string>
+#include <vector>
 
-#include <srs_app_thread.hpp>
+#include <srs_app_st.hpp>
 
-class SrsRequest;
+class ISrsRequest;
 class SrsPithyPrint;
-class SrsProcess;
+class ISrsProcess;
+class ISrsAppFactory;
+class ISrsAppConfig;
+
+// The ng-exec interface.
+class ISrsNgExec
+{
+public:
+    ISrsNgExec();
+    virtual ~ISrsNgExec();
+
+public:
+    virtual void assemble() = 0;
+    virtual srs_error_t on_publish(ISrsRequest *req) = 0;
+    virtual void on_unpublish() = 0;
+    virtual srs_error_t cycle() = 0;
+};
 
 // The ng-exec is the exec feature introduced by nginx-rtmp,
 // @see https://github.com/arut/nginx-rtmp-module/wiki/Directives#exec_push
 // @see https://github.com/ossrs/srs/issues/367
-class SrsNgExec : public ISrsCoroutineHandler
+class SrsNgExec : public ISrsCoroutineHandler, public ISrsNgExec
 {
-private:
-    SrsCoroutine* trd;
-    SrsPithyPrint* pprint;
-    std::string input_stream_name;
-    std::vector<SrsProcess*> exec_publishs;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsAppFactory *app_factory_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsCoroutine *trd_;
+    SrsPithyPrint *pprint_;
+    std::string input_stream_name_;
+    std::vector<ISrsProcess *> exec_publishs_;
+
 public:
     SrsNgExec();
+    void assemble(); // Construct object, to avoid call function in constructor.
     virtual ~SrsNgExec();
+
 public:
-    virtual srs_error_t on_publish(SrsRequest* req);
+    virtual srs_error_t on_publish(ISrsRequest *req);
     virtual void on_unpublish();
-// Interface ISrsReusableThreadHandler.
+    // Interface ISrsReusableThreadHandler.
 public:
     virtual srs_error_t cycle();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual srs_error_t do_cycle();
-private:
-    virtual srs_error_t parse_exec_publish(SrsRequest* req);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t parse_exec_publish(ISrsRequest *req);
     virtual void clear_exec_publish();
     virtual void show_exec_log_message();
-    virtual std::string parse(SrsRequest* req, std::string tmpl);
+    virtual std::string parse(ISrsRequest *req, std::string tmpl);
 };
 
 #endif
-

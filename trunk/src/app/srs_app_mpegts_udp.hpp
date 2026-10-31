@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_MPEGTS_UDP_HPP
 #define SRS_APP_MPEGTS_UDP_HPP
@@ -27,92 +10,197 @@
 #include <srs_core.hpp>
 
 struct sockaddr;
-#include <string>
 #include <map>
+#include <string>
 
 class SrsBuffer;
 class SrsTsContext;
+class ISrsTsContext;
 class SrsConfDirective;
 class SrsSimpleStream;
 class SrsRtmpClient;
 class SrsStSocket;
-class SrsRequest;
+class ISrsRequest;
 class SrsRawH264Stream;
-class SrsSharedPtrMessage;
+class ISrsRawH264Stream;
+class SrsMediaPacket;
 class SrsRawAacStream;
+class ISrsRawAacStream;
 struct SrsRawAacStreamCodec;
 class SrsPithyPrint;
+class ISrsPithyPrint;
 class SrsSimpleRtmpClient;
+class ISrsBasicRtmpClient;
+class SrsMpegtsOverUdp;
+class ISrsIpListener;
+class ISrsMpegtsOverUdp;
+class ISrsAppConfig;
+class ISrsAppFactory;
 
+#include <srs_app_listener.hpp>
 #include <srs_app_st.hpp>
 #include <srs_kernel_ts.hpp>
-#include <srs_app_listener.hpp>
+
+// The UDP stream caster listener interface.
+class ISrsUdpCasterListener : public ISrsListener
+{
+public:
+    ISrsUdpCasterListener();
+    virtual ~ISrsUdpCasterListener();
+
+public:
+    virtual void assemble() = 0; // Construct object, to avoid call function in constructor.
+    virtual srs_error_t initialize(SrsConfDirective *conf) = 0;
+    virtual void close() = 0;
+};
+
+// A UDP listener, for udp stream caster server.
+class SrsUdpCasterListener : public ISrsUdpCasterListener
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsIpListener *listener_;
+    ISrsMpegtsOverUdp *caster_;
+
+public:
+    SrsUdpCasterListener();
+    virtual ~SrsUdpCasterListener();
+
+public:
+    virtual void assemble(); // Construct object, to avoid call function in constructor.
+    virtual srs_error_t initialize(SrsConfDirective *conf);
+    virtual srs_error_t listen();
+    virtual void close();
+};
+
+// The interface for mpegts queue.
+class ISrsMpegtsQueue
+{
+public:
+    ISrsMpegtsQueue();
+    virtual ~ISrsMpegtsQueue();
+
+public:
+    virtual srs_error_t push(SrsMediaPacket *msg) = 0;
+    virtual SrsMediaPacket *dequeue() = 0;
+    // Free every queued message.
+    virtual void clear() = 0;
+};
 
 // The queue for mpegts over udp to send packets.
 // For the aac in mpegts contains many flv packets in a pes packet,
 // we must recalc the timestamp.
-class SrsMpegtsQueue
+class SrsMpegtsQueue : public ISrsMpegtsQueue
 {
-private:
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     // The key: dts, value: msg.
-    std::map<int64_t, SrsSharedPtrMessage*> msgs;
-    int nb_audios;
-    int nb_videos;
+    std::map<int64_t, SrsMediaPacket *>
+        msgs_;
+    int nb_audios_;
+    int nb_videos_;
+
 public:
     SrsMpegtsQueue();
     virtual ~SrsMpegtsQueue();
+
 public:
-    virtual srs_error_t push(SrsSharedPtrMessage* msg);
-    virtual SrsSharedPtrMessage* dequeue();
+    virtual srs_error_t push(SrsMediaPacket *msg);
+    virtual SrsMediaPacket *dequeue();
+    virtual void clear();
+};
+
+// The interface for mpegts over udp.
+class ISrsMpegtsOverUdp : public ISrsTsHandler, public ISrsUdpHandler
+{
+public:
+    ISrsMpegtsOverUdp();
+    virtual ~ISrsMpegtsOverUdp();
+
+public:
+    virtual void assemble() = 0; // Construct object, to avoid call function in constructor.
+    virtual srs_error_t initialize(SrsConfDirective *c) = 0;
 };
 
 // The mpegts over udp stream caster.
-class SrsMpegtsOverUdp : virtual public ISrsTsHandler, virtual public ISrsUdpHandler
+class SrsMpegtsOverUdp : public ISrsMpegtsOverUdp
 {
-private:
-    SrsTsContext* context;
-    SrsSimpleStream* buffer;
-    std::string output;
-private:
-    SrsSimpleRtmpClient* sdk;
-private:
-    SrsRawH264Stream* avc;
-    std::string h264_sps;
-    bool h264_sps_changed;
-    std::string h264_pps;
-    bool h264_pps_changed;
-    bool h264_sps_pps_sent;
-private:
-    SrsRawAacStream* aac;
-    std::string aac_specific_config;
-private:
-    SrsMpegtsQueue* queue;
-    SrsPithyPrint* pprint;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsAppFactory *app_factory_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsTsContext *context_;
+    SrsSimpleStream *buffer_;
+    std::string output_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsBasicRtmpClient *sdk_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsRawH264Stream *avc_;
+    std::string h264_sps_;
+    bool h264_sps_changed_;
+    std::string h264_pps_;
+    bool h264_pps_changed_;
+    bool h264_sps_pps_sent_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsRawAacStream *aac_;
+    std::string aac_specific_config_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsMpegtsQueue *queue_;
+    ISrsPithyPrint *pprint_;
+
 public:
-    SrsMpegtsOverUdp(SrsConfDirective* c);
+    SrsMpegtsOverUdp();
     virtual ~SrsMpegtsOverUdp();
-// Interface ISrsUdpHandler
+
 public:
-    virtual srs_error_t on_udp_packet(const sockaddr* from, const int fromlen, char* buf, int nb_buf);
-private:
-    virtual srs_error_t on_udp_bytes(std::string host, int port, char* buf, int nb_buf);
-// Interface ISrsTsHandler
+    void assemble(); // Construct object, to avoid call function in constructor.
+    srs_error_t initialize(SrsConfDirective *c);
+    // Interface ISrsUdpHandler
 public:
-    virtual srs_error_t on_ts_message(SrsTsMessage* msg);
-private:
-    virtual srs_error_t on_ts_video(SrsTsMessage* msg, SrsBuffer* avs);
+    virtual srs_error_t on_udp_packet(const sockaddr *from, const int fromlen, char *buf, int nb_buf);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t on_udp_bytes(std::string host, int port, char *buf, int nb_buf);
+    // Interface ISrsTsHandler
+public:
+    virtual srs_error_t on_ts_message(SrsTsMessage *msg);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t on_ts_video(SrsTsMessage *msg, SrsBuffer *avs);
     virtual srs_error_t write_h264_sps_pps(uint32_t dts, uint32_t pts);
-    virtual srs_error_t write_h264_ipb_frame(char* frame, int frame_size, uint32_t dts, uint32_t pts);
-    virtual srs_error_t on_ts_audio(SrsTsMessage* msg, SrsBuffer* avs);
-    virtual srs_error_t write_audio_raw_frame(char* frame, int frame_size, SrsRawAacStreamCodec* codec, uint32_t dts);
-private:
-    virtual srs_error_t rtmp_write_packet(char type, uint32_t timestamp, char* data, int size);
-private:
+    virtual srs_error_t write_h264_ipb_frame(const std::string &ibps, bool keyframe, uint32_t dts, uint32_t pts);
+    virtual srs_error_t on_ts_audio(SrsTsMessage *msg, SrsBuffer *avs);
+    virtual srs_error_t write_audio_raw_frame(char *frame, int frame_size, SrsRawAacStreamCodec *codec, uint32_t dts);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t rtmp_write_packet(char type, uint32_t timestamp, char *data, int size);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     // Connect to RTMP server.
     virtual srs_error_t connect();
-    // Close the connection to RTMP server.
+    // Close the connection to RTMP server. The next connection is a new
+    // publish, so the caster drops what it queued for this one and sends
+    // each sequence header again.
     virtual void close();
 };
 
 #endif
-

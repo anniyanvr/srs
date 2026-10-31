@@ -1,4 +1,6 @@
-/* 
+/* SPDX-License-Identifier: MPL-1.1 OR GPL-2.0-or-later */
+
+/*
  * The contents of this file are subject to the Mozilla Public
  * License Version 1.1 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
@@ -37,6 +39,62 @@
 #ifndef __ST_THREAD_H__
 #define __ST_THREAD_H__
 
+#if defined(_WIN32) || defined(_MSC_VER)
+/*
+ * Native Windows with MSVC, which defines _WIN32 and _MSC_VER. Cygwin GCC
+ * defines neither.
+ */
+
+/*
+ * st.h includes winsock2.h, but windows.h includes the old winsock.h, and the
+ * two cannot be used together. So include st.h before windows.h:
+ *     #include <st.h>
+ *     #include <windows.h>
+ * Or define WIN32_LEAN_AND_MEAN, so windows.h does not include winsock.h:
+ *     #define WIN32_LEAN_AND_MEAN
+ *     #include <windows.h>
+ *     #include <st.h>
+ * In the wrong order, the build fails anyway with many redefinition errors in
+ * the Windows headers, so fail here first with a clear message.
+ */
+#if defined(_WINSOCKAPI_) && !defined(_WINSOCK2API_) && defined(IPPROTO_TCP)
+#error "winsock.h is already included, by windows.h: include st.h before windows.h, or define WIN32_LEAN_AND_MEAN"
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+#include <time.h>
+#include <errno.h>
+
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+typedef intptr_t ssize_t;
+#endif
+
+#ifndef _MODE_T_DEFINED
+#define _MODE_T_DEFINED
+typedef int mode_t;
+#endif
+
+struct iovec {
+    void *iov_base;
+    size_t iov_len;
+};
+
+struct msghdr {
+    void *msg_name;
+    socklen_t msg_namelen;
+    struct iovec *msg_iov;
+    int msg_iovlen;
+    void *msg_control;
+    socklen_t msg_controllen;
+    int msg_flags;
+};
+#else
+/* POSIX: Linux, macOS, and Cygwin. */
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -44,10 +102,12 @@
 #include <time.h>
 #include <errno.h>
 #include <poll.h>
+#endif
 
-#define ST_VERSION	    "1.9"
+#define ST_VERSION	    "1.9.2"
 #define ST_VERSION_MAJOR    1
 #define ST_VERSION_MINOR    9
+#define ST_VERSION_PATCH    2
 
 /* Undefine this to remove the context switch callback feature. */
 #define ST_SWITCH_CB
@@ -66,7 +126,6 @@
 
 #define ST_EVENTSYS_DEFAULT 0
 #define ST_EVENTSYS_SELECT  1
-#define ST_EVENTSYS_POLL    2
 #define ST_EVENTSYS_ALT     3
 
 #ifdef __cplusplus
@@ -98,6 +157,7 @@ extern st_thread_t st_thread_self(void);
 extern void st_thread_exit(void *retval);
 extern int st_thread_join(st_thread_t thread, void **retvalp);
 extern void st_thread_interrupt(st_thread_t thread);
+extern void st_thread_yield();
 extern st_thread_t st_thread_create(void *(*start)(void *arg), void *arg, int joinable, int stack_size);
 extern int st_randomize_stacks(int on);
 extern int st_set_utime_function(st_utime_t (*func)(void));
@@ -152,15 +212,12 @@ extern int st_sendto(st_netfd_t fd, const void *msg, int len, const struct socka
 extern int st_recvmsg(st_netfd_t fd, struct msghdr *msg, int flags, st_utime_t timeout);
 extern int st_sendmsg(st_netfd_t fd, const struct msghdr *msg, int flags, st_utime_t timeout);
 
-// @see http://man7.org/linux/man-pages/man2/sendmmsg.2.html
-#include <sys/socket.h>
-struct st_mmsghdr {
-   struct msghdr msg_hdr;  /* Message header */
-   unsigned int  msg_len;  /* Number of bytes transmitted */
-};
-extern int st_sendmmsg(st_netfd_t fd, struct st_mmsghdr *msgvec, unsigned int vlen, int flags, st_utime_t timeout);
-
 extern st_netfd_t st_open(const char *path, int oflags, mode_t mode);
+
+extern void st_destroy(void);
+extern int st_thread_setspecific2(st_thread_t thread, int key, void *value);
+
+extern void st_set_primordial_stack(void *top, void *bottom);
 
 #ifdef DEBUG
 extern void _st_show_thread_stack(st_thread_t thread, const char *messg);

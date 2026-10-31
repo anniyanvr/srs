@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_FORWARD_HPP
 #define SRS_APP_FORWARD_HPP
@@ -29,64 +12,120 @@
 #include <string>
 
 #include <srs_app_st.hpp>
-#include <srs_app_thread.hpp>
 
 class ISrsProtocolReadWriter;
-class SrsSharedPtrMessage;
+class SrsMediaPacket;
 class SrsOnMetaDataPacket;
 class SrsMessageQueue;
 class SrsRtmpJitter;
 class SrsRtmpClient;
-class SrsRequest;
-class SrsSource;
+class ISrsRequest;
+class SrsLiveSource;
 class SrsOriginHub;
+class ISrsOriginHub;
 class SrsKbps;
 class SrsSimpleRtmpClient;
+class ISrsBasicRtmpClient;
+class ISrsAppFactory;
+class ISrsAppConfig;
+class ISrsStatistic;
+
+// The forward interface.
+class ISrsForwarder
+{
+public:
+    ISrsForwarder();
+    virtual ~ISrsForwarder();
+
+public:
+    virtual srs_error_t initialize(ISrsRequest *r, std::string ep) = 0;
+    virtual void set_queue_size(srs_utime_t queue_size) = 0;
+    virtual srs_error_t on_publish() = 0;
+    virtual void on_unpublish() = 0;
+    virtual srs_error_t on_meta_data(SrsMediaPacket *shared_metadata) = 0;
+    virtual srs_error_t on_audio(SrsMediaPacket *shared_audio) = 0;
+    virtual srs_error_t on_video(SrsMediaPacket *shared_video) = 0;
+};
 
 // Forward the stream to other servers.
-class SrsForwarder : public ISrsCoroutineHandler
+class SrsForwarder : public ISrsCoroutineHandler, public ISrsForwarder
 {
-private:
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppFactory *app_factory_;
+    ISrsAppConfig *config_;
+    ISrsStatistic *stat_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The forward id, which identifies this forwarder in the statistic and the HTTP API.
+    std::string id_;
     // The ep to forward, server[:port].
-    std::string ep_forward;
-    SrsRequest* req;
-private:
-    SrsCoroutine* trd;
-private:
-    SrsOriginHub* hub;
-    SrsSimpleRtmpClient* sdk;
-    SrsRtmpJitter* jitter;
-    SrsMessageQueue* queue;
-    // Cache the sequence header for retry when slave is failed.
-    // @see https://github.com/ossrs/srs/issues/150
-    SrsSharedPtrMessage* sh_audio;
-    SrsSharedPtrMessage* sh_video;
+    std::string ep_forward_;
+    ISrsRequest *req_;
+    // The request of the publishing stream this forwarder belongs to, for the statistic. It differs
+    // from req_ for a forward.backend url, which has its own app and stream.
+    ISrsRequest *stream_req_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The source or stream context id to bind to.
+    SrsContextId source_cid_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsCoroutine *trd_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsOriginHub *hub_;
+    ISrsBasicRtmpClient *sdk_;
+    SrsRtmpJitter *jitter_;
+    SrsMessageQueue *queue_;
+    // Cache the metadata and sequence headers, sent first after each publish to the destination.
+    SrsMediaPacket *metadata_;
+    SrsMediaPacket *sh_audio_;
+    SrsMediaPacket *sh_video_;
+    // Whether to drop video until the next keyframe, after a publish or a queue overflow, so the
+    // destination never starts from the middle of a GOP. Audio and sequence headers pass.
+    bool wait_keyframe_;
+
 public:
-    SrsForwarder(SrsOriginHub* h);
+    // The req is the publishing stream this forwarder belongs to.
+    SrsForwarder(ISrsOriginHub *h, ISrsRequest *req);
     virtual ~SrsForwarder();
+
 public:
-    virtual srs_error_t initialize(SrsRequest* r, std::string ep);
+    virtual srs_error_t initialize(ISrsRequest *r, std::string ep);
     virtual void set_queue_size(srs_utime_t queue_size);
+
 public:
     virtual srs_error_t on_publish();
     virtual void on_unpublish();
     // Forward the audio packet.
     // @param shared_metadata, directly ptr, copy it if need to save it.
-    virtual srs_error_t on_meta_data(SrsSharedPtrMessage* shared_metadata);
+    virtual srs_error_t on_meta_data(SrsMediaPacket *shared_metadata);
     // Forward the audio packet.
     // @param shared_audio, directly ptr, copy it if need to save it.
-    virtual srs_error_t on_audio(SrsSharedPtrMessage* shared_audio);
+    virtual srs_error_t on_audio(SrsMediaPacket *shared_audio);
     // Forward the video packet.
     // @param shared_video, directly ptr, copy it if need to save it.
-    virtual srs_error_t on_video(SrsSharedPtrMessage* shared_video);
-// Interface ISrsReusableThread2Handler.
+    virtual srs_error_t on_video(SrsMediaPacket *shared_video);
+    // Interface ISrsReusableThread2Handler.
 public:
     virtual srs_error_t cycle();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual srs_error_t do_cycle();
-private:
+    // The full destination url to publish to, with the stream key and query.
+    virtual std::string destination_url();
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual srs_error_t forward();
+    // Enqueue a packet, and wait for the next keyframe if the queue overflows and shrinks.
+    virtual srs_error_t enqueue(SrsMediaPacket *msg);
 };
 
 #endif
-

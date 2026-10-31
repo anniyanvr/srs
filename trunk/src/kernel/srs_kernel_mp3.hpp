@@ -1,55 +1,53 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_KERNEL_MP3_HPP
 #define SRS_KERNEL_MP3_HPP
 
 #include <srs_core.hpp>
 
-#if !defined(SRS_EXPORT_LIBRTMP)
-
 #include <string>
 
 class SrsBuffer;
-class SrsFileWriter;
+class ISrsFileWriter;
+
+// The interface for MP3 transmuxer.
+class ISrsMp3Transmuxer
+{
+public:
+    ISrsMp3Transmuxer();
+    virtual ~ISrsMp3Transmuxer();
+
+public:
+    virtual srs_error_t initialize(ISrsFileWriter *fw) = 0;
+    virtual srs_error_t write_header() = 0;
+    virtual srs_error_t write_audio(int64_t timestamp, char *data, int size) = 0;
+};
 
 /**
  * Transmux RTMP packet to MP3 stream.
  */
-class SrsMp3Transmuxer
+class SrsMp3Transmuxer : public ISrsMp3Transmuxer
 {
-private:
-    SrsFileWriter* writer;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsFileWriter *writer_;
+
 public:
     SrsMp3Transmuxer();
     virtual ~SrsMp3Transmuxer();
+
 public:
     /**
      * initialize the underlayer file stream.
      * @remark user can initialize multiple times to encode multiple mp3 files.
      * @remark, user must free the @param fw, mp3 encoder never close/free it.
      */
-    virtual srs_error_t initialize(SrsFileWriter* fw);
+    virtual srs_error_t initialize(ISrsFileWriter *fw);
+
 public:
     /**
      * write mp3 id3 v2.3 header.
@@ -60,10 +58,7 @@ public:
      * write audio/video packet.
      * @remark assert data is not NULL.
      */
-    virtual srs_error_t write_audio(int64_t timestamp, char* data, int size);
+    virtual srs_error_t write_audio(int64_t timestamp, char *data, int size);
 };
 
 #endif
-
-#endif
-

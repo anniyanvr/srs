@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_KERNEL_STREAM_HPP
 #define SRS_KERNEL_STREAM_HPP
@@ -34,11 +17,14 @@
  */
 class SrsSimpleStream
 {
-private:
-    std::vector<char> data;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    std::vector<char> data_;
+
 public:
     SrsSimpleStream();
     virtual ~SrsSimpleStream();
+
 public:
     /**
      * get the length of buffer. empty if zero.
@@ -49,7 +35,7 @@ public:
      * get the buffer bytes.
      * @return the bytes, NULL if empty.
      */
-    virtual char* bytes();
+    virtual char *bytes();
     /**
      * erase size of bytes from begin.
      * @param size to erase size of bytes.
@@ -62,8 +48,8 @@ public:
      * @param size the size of bytes
      * @remark assert size is positive.
      */
-    virtual void append(const char* bytes, int size);
-    virtual void append(SrsSimpleStream* src);
+    virtual void append(const char *bytes, int size);
+    virtual void append(SrsSimpleStream *src);
 };
 
 #endif

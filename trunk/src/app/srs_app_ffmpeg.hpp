@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_FFMPEG_HPP
 #define SRS_APP_FFMPEG_HPP
@@ -28,59 +11,103 @@
 
 #ifdef SRS_FFMPEG_STUB
 
-#include <vector>
 #include <string>
+#include <vector>
 
 class SrsConfDirective;
 class SrsPithyPrint;
+class ISrsPithyPrint;
 class SrsProcess;
+class ISrsProcess;
+class ISrsAppConfig;
+
+// The ffmpeg interface.
+class ISrsFFMPEG
+{
+public:
+    ISrsFFMPEG();
+    virtual ~ISrsFFMPEG();
+
+public:
+    virtual void append_iparam(std::string iparam) = 0;
+    virtual void set_oformat(std::string format) = 0;
+    virtual std::string output() = 0;
+
+public:
+    virtual srs_error_t initialize(std::string in, std::string out, std::string log) = 0;
+    virtual srs_error_t initialize_transcode(SrsConfDirective *engine) = 0;
+    virtual srs_error_t initialize_copy() = 0;
+
+public:
+    virtual srs_error_t start() = 0;
+    virtual srs_error_t cycle() = 0;
+    virtual void stop() = 0;
+
+public:
+    virtual void fast_stop() = 0;
+    virtual void fast_kill() = 0;
+};
 
 // A transcode engine: ffmepg, used to transcode a stream to another.
-class SrsFFMPEG
+class SrsFFMPEG : public ISrsFFMPEG
 {
-private:
-    SrsProcess* process;
-    std::vector<std::string> params;
-private:
-    std::string log_file;
-private:
-    std::string                 ffmpeg;
-    std::vector<std::string>    iparams;
-    std::vector<std::string>    perfile;
-    std::string                 iformat;
-    std::string                 input;
-    std::vector<std::string>    vfilter;
-    std::string                 vcodec;
-    int                         vbitrate;
-    double                      vfps;
-    int                         vwidth;
-    int                         vheight;
-    int                         vthreads;
-    std::string                 vprofile;
-    std::string                 vpreset;
-    std::vector<std::string>    vparams;
-    std::string                 acodec;
-    int                         abitrate;
-    int                         asample_rate;
-    int                         achannels;
-    std::vector<std::string>    aparams;
-    std::string                 oformat;
-    std::string                 _output;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsProcess *process_;
+    std::vector<std::string> params_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    std::string log_file_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    std::string ffmpeg_;
+    std::vector<std::string> iparams_;
+    std::vector<std::string> perfile_;
+    std::string iformat_;
+    std::string input_;
+    std::vector<std::string> vfilter_;
+    std::string vcodec_;
+    int vbitrate_;
+    double vfps_;
+    int vwidth_;
+    int vheight_;
+    int vthreads_;
+    std::string vprofile_;
+    std::string vpreset_;
+    std::vector<std::string> vparams_;
+    std::string acodec_;
+    int abitrate_;
+    int asample_rate_;
+    int achannels_;
+    std::vector<std::string> aparams_;
+    std::string oformat_;
+    std::string output_;
+
 public:
     SrsFFMPEG(std::string ffmpeg_bin);
     virtual ~SrsFFMPEG();
+
 public:
     virtual void append_iparam(std::string iparam);
     virtual void set_oformat(std::string format);
     virtual std::string output();
+
 public:
     virtual srs_error_t initialize(std::string in, std::string out, std::string log);
-    virtual srs_error_t initialize_transcode(SrsConfDirective* engine);
+    virtual srs_error_t initialize_transcode(SrsConfDirective *engine);
     virtual srs_error_t initialize_copy();
+
 public:
     virtual srs_error_t start();
     virtual srs_error_t cycle();
     virtual void stop();
+
 public:
     virtual void fast_stop();
     virtual void fast_kill();
@@ -89,4 +116,3 @@ public:
 #endif
 
 #endif
-

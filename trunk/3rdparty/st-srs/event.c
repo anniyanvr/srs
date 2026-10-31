@@ -1,4 +1,6 @@
-/* 
+/* SPDX-License-Identifier: MPL-1.1 OR GPL-2.0-or-later */
+
+/*
  * The contents of this file are subject to the Mozilla Public
  * License Version 1.1 (the "License"); you may not use this file
  * except in compliance with the License. You may obtain a copy of
@@ -33,7 +35,11 @@
  */
 
 #include <stdlib.h>
+#if !defined(WIN64)
 #include <unistd.h>
+#else
+#include <limits.h>
+#endif
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
@@ -47,13 +53,21 @@
 #include <sys/epoll.h>
 #endif
 
-#if defined(USE_POLL) && !defined(MD_HAVE_POLL)
-    /* Force poll usage if explicitly asked for it */
-    #define MD_HAVE_POLL
+// Global stat.
+#if defined(DEBUG) && defined(DEBUG_STATS)
+__thread unsigned long long _st_stat_epoll = 0;
+__thread unsigned long long _st_stat_epoll_zero = 0;
+__thread unsigned long long _st_stat_epoll_shake = 0;
+__thread unsigned long long _st_stat_epoll_spin = 0;
+#endif
+
+#if !defined(MD_HAVE_KQUEUE) && !defined(MD_HAVE_EPOLL) && !defined(MD_HAVE_SELECT) && !defined(WIN64)
+    #error Only support epoll(for Linux), kqueue(for Darwin) or select(for Cygwin)
 #endif
 
 
-static struct _st_seldata {
+#ifdef MD_HAVE_SELECT
+static __thread struct _st_seldata {
     fd_set fd_read_set, fd_write_set, fd_exception_set;
     int fd_ref_cnts[FD_SETSIZE][3];
     int maxfd;
@@ -66,19 +80,7 @@ static struct _st_seldata {
 #define _ST_SELECT_READ_CNT(fd)  (_st_select_data->fd_ref_cnts[fd][0])
 #define _ST_SELECT_WRITE_CNT(fd) (_st_select_data->fd_ref_cnts[fd][1])
 #define _ST_SELECT_EXCEP_CNT(fd) (_st_select_data->fd_ref_cnts[fd][2])
-
-
-#ifdef MD_HAVE_POLL
-static struct _st_polldata {
-    struct pollfd *pollfds;
-    int pollfds_size;
-    int fdcnt;
-} *_st_poll_data;
-
-#define _ST_POLL_OSFD_CNT        (_st_poll_data->fdcnt) 
-#define _ST_POLLFDS              (_st_poll_data->pollfds) 
-#define _ST_POLLFDS_SIZE         (_st_poll_data->pollfds_size)
-#endif  /* MD_HAVE_POLL */
+#endif
 
 
 #ifdef MD_HAVE_KQUEUE
@@ -88,7 +90,7 @@ typedef struct _kq_fd_data {
     int revents;
 } _kq_fd_data_t;
 
-static struct _st_kqdata {
+static __thread struct _st_kqdata {
     _kq_fd_data_t *fd_data;
     struct kevent *evtlist;
     struct kevent *addlist;
@@ -121,7 +123,7 @@ typedef struct _epoll_fd_data {
     int revents;
 } _epoll_fd_data_t;
 
-static struct _st_epolldata {
+static __thread struct _st_epolldata {
     _epoll_fd_data_t *fd_data;
     struct epoll_event *evtlist;
     int fd_data_size;
@@ -129,7 +131,6 @@ static struct _st_epolldata {
     int evtlist_cnt;
     int fd_hint;
     int epfd;
-    pid_t pid;
 } *_st_epoll_data;
 
 #ifndef ST_EPOLL_EVTLIST_SIZE
@@ -150,9 +151,10 @@ static struct _st_epolldata {
 
 #endif  /* MD_HAVE_EPOLL */
 
-_st_eventsys_t *_st_eventsys = NULL;
+__thread _st_eventsys_t *_st_eventsys = NULL;
 
 
+#ifdef MD_HAVE_SELECT
 /*****************************************
  * select event system
  */
@@ -160,8 +162,8 @@ _st_eventsys_t *_st_eventsys = NULL;
 ST_HIDDEN int _st_select_init(void)
 {
     _st_select_data = (struct _st_seldata *) malloc(sizeof(*_st_select_data));
-    if (!_st_select_data)
-        return -1;
+    if (!_st_select_data) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     memset(_st_select_data, 0, sizeof(*_st_select_data));
     _st_select_data->maxfd = -1;
@@ -235,17 +237,17 @@ ST_HIDDEN void _st_select_find_bad_fd(void)
 
     _ST_SELECT_MAX_OSFD = -1;
 
-    for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
+    for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
         pq = _ST_POLLQUEUE_PTR(q);
         notify = 0;
         epds = pq->pds + pq->npds;
         pq_max_osfd = -1;
-      
+
         for (pds = pq->pds; pds < epds; pds++) {
             osfd = pds->fd;
             pds->revents = 0;
             if (pds->events == 0)
-                continue;
+                continue; /* GCOVR_EXCL_LINE */
             if (fcntl(osfd, F_GETFL, 0) < 0) {
                 pds->revents = POLLNVAL;
                 notify = 1;
@@ -256,7 +258,7 @@ ST_HIDDEN void _st_select_find_bad_fd(void)
         }
 
         if (notify) {
-            ST_REMOVE_LINK(&pq->links);
+            st_clist_remove(&pq->links);
             pq->on_ioq = 0;
             /*
              * Decrement the count of descriptors for each descriptor/event
@@ -283,9 +285,9 @@ ST_HIDDEN void _st_select_find_bad_fd(void)
             }
 
             if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
-                _ST_DEL_SLEEPQ(pq->thread);
+                _st_del_sleep_q(pq->thread);
             pq->thread->state = _ST_ST_RUNNABLE;
-            _ST_ADD_RUNQ(pq->thread);
+            st_clist_insert_before(&pq->thread->links, &_st_this_vp.run_q);
         } else {
             if (_ST_SELECT_MAX_OSFD < pq_max_osfd)
                 _ST_SELECT_MAX_OSFD = pq_max_osfd;
@@ -317,11 +319,11 @@ ST_HIDDEN void _st_select_dispatch(void)
     wp = &w;
     ep = &e;
 
-    if (_ST_SLEEPQ == NULL) {
+    if (_st_this_vp.sleep_q == NULL) {
         tvp = NULL;
     } else {
-        min_timeout = (_ST_SLEEPQ->due <= _ST_LAST_CLOCK) ? 0 :
-            (_ST_SLEEPQ->due - _ST_LAST_CLOCK);
+        min_timeout = (_st_this_vp.sleep_q->due <= _st_this_vp.last_clock) ? 0 :
+                      (_st_this_vp.sleep_q->due - _st_this_vp.last_clock);
         timeout.tv_sec  = (int) (min_timeout / 1000000);
         timeout.tv_usec = (int) (min_timeout % 1000000);
         tvp = &timeout;
@@ -333,12 +335,12 @@ ST_HIDDEN void _st_select_dispatch(void)
     /* Notify threads that are associated with the selected descriptors */
     if (nfd > 0) {
         _ST_SELECT_MAX_OSFD = -1;
-        for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
+        for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
             pq = _ST_POLLQUEUE_PTR(q);
             notify = 0;
             epds = pq->pds + pq->npds;
             pq_max_osfd = -1;
-      
+
             for (pds = pq->pds; pds < epds; pds++) {
                 osfd = pds->fd;
                 events = pds->events;
@@ -361,7 +363,7 @@ ST_HIDDEN void _st_select_dispatch(void)
                 }
             }
             if (notify) {
-                ST_REMOVE_LINK(&pq->links);
+                st_clist_remove(&pq->links);
                 pq->on_ioq = 0;
                 /*
                  * Decrement the count of descriptors for each descriptor/event
@@ -388,9 +390,9 @@ ST_HIDDEN void _st_select_dispatch(void)
                 }
 
                 if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
-                    _ST_DEL_SLEEPQ(pq->thread);
+                    _st_del_sleep_q(pq->thread);
                 pq->thread->state = _ST_ST_RUNNABLE;
-                _ST_ADD_RUNQ(pq->thread);
+                st_clist_insert_before(&pq->thread->links, &_st_this_vp.run_q);
             } else {
                 if (_ST_SELECT_MAX_OSFD < pq_max_osfd)
                     _ST_SELECT_MAX_OSFD = pq_max_osfd;
@@ -432,170 +434,25 @@ ST_HIDDEN int _st_select_fd_getlimit(void)
     return FD_SETSIZE;
 }
 
+ST_HIDDEN void _st_select_destroy(void)
+{
+    free(_st_select_data);
+    _st_select_data = NULL;
+}
+
 static _st_eventsys_t _st_select_eventsys = {
-    "select",
-    ST_EVENTSYS_SELECT,
-    _st_select_init,
-    _st_select_dispatch,
-    _st_select_pollset_add,
-    _st_select_pollset_del,
-    _st_select_fd_new,
-    _st_select_fd_close,
-    _st_select_fd_getlimit
+        "select",
+        ST_EVENTSYS_SELECT,
+        _st_select_init,
+        _st_select_dispatch,
+        _st_select_pollset_add,
+        _st_select_pollset_del,
+        _st_select_fd_new,
+        _st_select_fd_close,
+        _st_select_fd_getlimit,
+        _st_select_destroy
 };
-
-
-#ifdef MD_HAVE_POLL
-/*****************************************
- * poll event system
- */
-
-ST_HIDDEN int _st_poll_init(void)
-{
-    _st_poll_data = (struct _st_polldata *) malloc(sizeof(*_st_poll_data));
-    if (!_st_poll_data)
-        return -1;
-
-    _ST_POLLFDS = (struct pollfd *) malloc(ST_MIN_POLLFDS_SIZE *
-                                           sizeof(struct pollfd));
-    if (!_ST_POLLFDS) {
-        free(_st_poll_data);
-        _st_poll_data = NULL;
-        return -1;
-    }
-    _ST_POLLFDS_SIZE = ST_MIN_POLLFDS_SIZE;
-    _ST_POLL_OSFD_CNT = 0;
-
-    return 0;
-}
-
-ST_HIDDEN int _st_poll_pollset_add(struct pollfd *pds, int npds)
-{
-    struct pollfd *pd;
-    struct pollfd *epd = pds + npds;
-
-    for (pd = pds; pd < epd; pd++) {
-        if (pd->fd < 0 || !pd->events) {
-            errno = EINVAL;
-            return -1;
-        }
-    }
-
-    _ST_POLL_OSFD_CNT += npds;
-
-    return 0;
-}
-
-/* ARGSUSED */
-ST_HIDDEN void _st_poll_pollset_del(struct pollfd *pds, int npds)
-{
-    _ST_POLL_OSFD_CNT -= npds;
-    ST_ASSERT(_ST_POLL_OSFD_CNT >= 0);
-}
-
-ST_HIDDEN void _st_poll_dispatch(void)
-{
-    int timeout, nfd;
-    _st_clist_t *q;
-    st_utime_t min_timeout;
-    _st_pollq_t *pq;
-    struct pollfd *pds, *epds, *pollfds;
-
-    /*
-     * Build up the array of struct pollfd to wait on.
-     * If existing array is not big enough, release it and allocate a new one.
-     */
-    ST_ASSERT(_ST_POLL_OSFD_CNT >= 0);
-    if (_ST_POLL_OSFD_CNT > _ST_POLLFDS_SIZE) {
-        free(_ST_POLLFDS);
-        _ST_POLLFDS = (struct pollfd *) malloc((_ST_POLL_OSFD_CNT + 10) *
-                                               sizeof(struct pollfd));
-        ST_ASSERT(_ST_POLLFDS != NULL);
-        _ST_POLLFDS_SIZE = _ST_POLL_OSFD_CNT + 10;
-    }
-    pollfds = _ST_POLLFDS;
-
-    /* Gather all descriptors into one array */
-    for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
-        pq = _ST_POLLQUEUE_PTR(q);
-        memcpy(pollfds, pq->pds, sizeof(struct pollfd) * pq->npds);
-        pollfds += pq->npds;
-    }
-    ST_ASSERT(pollfds <= _ST_POLLFDS + _ST_POLLFDS_SIZE);
-
-    if (_ST_SLEEPQ == NULL) {
-        timeout = -1;
-    } else {
-        min_timeout = (_ST_SLEEPQ->due <= _ST_LAST_CLOCK) ? 0 :
-            (_ST_SLEEPQ->due - _ST_LAST_CLOCK);
-        timeout = (int) (min_timeout / 1000);
-    }
-
-    /* Check for I/O operations */
-    nfd = poll(_ST_POLLFDS, _ST_POLL_OSFD_CNT, timeout);
-
-    /* Notify threads that are associated with the selected descriptors */
-    if (nfd > 0) {
-        pollfds = _ST_POLLFDS;
-        for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
-            pq = _ST_POLLQUEUE_PTR(q);
-            epds = pollfds + pq->npds;
-            for (pds = pollfds; pds < epds; pds++) {
-                if (pds->revents)
-                    break;
-            }
-            if (pds < epds) {
-                memcpy(pq->pds, pollfds, sizeof(struct pollfd) * pq->npds);
-                ST_REMOVE_LINK(&pq->links);
-                pq->on_ioq = 0;
-
-                if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
-                    _ST_DEL_SLEEPQ(pq->thread);
-                pq->thread->state = _ST_ST_RUNNABLE;
-                _ST_ADD_RUNQ(pq->thread);
-
-                _ST_POLL_OSFD_CNT -= pq->npds;
-                ST_ASSERT(_ST_POLL_OSFD_CNT >= 0);
-            }
-            pollfds = epds;
-        }
-    }
-}
-
-/* ARGSUSED */
-ST_HIDDEN int _st_poll_fd_new(int osfd)
-{
-    return 0;
-}
-
-/* ARGSUSED */
-ST_HIDDEN int _st_poll_fd_close(int osfd)
-{
-    /*
-     * We don't maintain I/O counts for poll event system
-     * so nothing to check here.
-     */
-    return 0;
-}
-
-ST_HIDDEN int _st_poll_fd_getlimit(void)
-{
-    /* zero means no specific limit */
-    return 0;
-}
-
-static _st_eventsys_t _st_poll_eventsys = {
-    "poll",
-    ST_EVENTSYS_POLL,
-    _st_poll_init,
-    _st_poll_dispatch,
-    _st_poll_pollset_add,
-    _st_poll_pollset_del,
-    _st_poll_fd_new,
-    _st_poll_fd_close,
-    _st_poll_fd_getlimit
-};
-#endif  /* MD_HAVE_POLL */
+#endif
 
 
 #ifdef MD_HAVE_KQUEUE
@@ -609,14 +466,16 @@ ST_HIDDEN int _st_kq_init(void)
     int rv = 0;
 
     _st_kq_data = (struct _st_kqdata *) calloc(1, sizeof(*_st_kq_data));
-    if (!_st_kq_data)
-        return -1;
+    if (!_st_kq_data) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
+    /* GCOVR_EXCL_START */
     if ((_st_kq_data->kq = kqueue()) < 0) {
         err = errno;
         rv = -1;
         goto cleanup_kq;
     }
+    /* GCOVR_EXCL_STOP */
     fcntl(_st_kq_data->kq, F_SETFD, FD_CLOEXEC);
     _st_kq_data->pid = getpid();
 
@@ -626,11 +485,13 @@ ST_HIDDEN int _st_kq_init(void)
      */
     _st_kq_data->fd_data_size = FD_SETSIZE;
     _st_kq_data->fd_data = (_kq_fd_data_t *)calloc(_st_kq_data->fd_data_size, sizeof(_kq_fd_data_t));
+    /* GCOVR_EXCL_START */
     if (!_st_kq_data->fd_data) {
         err = errno;
         rv = -1;
         goto cleanup_kq;
     }
+    /* GCOVR_EXCL_STOP */
 
     /* Allocate event lists */
     _st_kq_data->evtlist_size = ST_KQ_MIN_EVTLIST_SIZE;
@@ -639,12 +500,15 @@ ST_HIDDEN int _st_kq_init(void)
     _st_kq_data->addlist = (struct kevent *)malloc(_st_kq_data->addlist_size * sizeof(struct kevent));
     _st_kq_data->dellist_size = ST_KQ_MIN_EVTLIST_SIZE;
     _st_kq_data->dellist = (struct kevent *)malloc(_st_kq_data->dellist_size * sizeof(struct kevent));
+    /* GCOVR_EXCL_START */
     if (!_st_kq_data->evtlist || !_st_kq_data->addlist ||
         !_st_kq_data->dellist) {
         err = ENOMEM;
         rv = -1;
     }
+    /* GCOVR_EXCL_STOP */
 
+    /* GCOVR_EXCL_START */
  cleanup_kq:
     if (rv < 0) {
         if (_st_kq_data->kq >= 0)
@@ -657,6 +521,7 @@ ST_HIDDEN int _st_kq_init(void)
         _st_kq_data = NULL;
         errno = err;
     }
+    /* GCOVR_EXCL_STOP */
 
     return rv;
 }
@@ -670,8 +535,8 @@ ST_HIDDEN int _st_kq_fd_data_expand(int maxfd)
         n <<= 1;
 
     ptr = (_kq_fd_data_t *)realloc(_st_kq_data->fd_data, n * sizeof(_kq_fd_data_t));
-    if (!ptr)
-        return -1;
+    if (!ptr) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     memset(ptr + _st_kq_data->fd_data_size, 0, (n - _st_kq_data->fd_data_size) * sizeof(_kq_fd_data_t));
 
@@ -690,8 +555,8 @@ ST_HIDDEN int _st_kq_addlist_expand(int avail)
         n <<= 1;
 
     ptr = (struct kevent *)realloc(_st_kq_data->addlist, n * sizeof(struct kevent));
-    if (!ptr)
-        return -1;
+    if (!ptr) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     _st_kq_data->addlist = ptr;
     _st_kq_data->addlist_size = n;
@@ -725,9 +590,9 @@ ST_HIDDEN void _st_kq_dellist_add(const struct kevent *kev)
 
         n <<= 1;
         ptr = (struct kevent *)realloc(_st_kq_data->dellist, n * sizeof(struct kevent));
-        if (!ptr) {
+        if (!ptr) { /* GCOVR_EXCL_BR_LINE */
             /* See comment in _st_kq_pollset_del() */
-            return;
+            return; /* GCOVR_EXCL_LINE */
         }
 
         _st_kq_data->dellist = ptr;
@@ -845,10 +710,10 @@ ST_HIDDEN void _st_kq_dispatch(void)
     int nfd, i, osfd, notify, filter;
     short events, revents;
 
-    if (_ST_SLEEPQ == NULL) {
+    if (_st_this_vp.sleep_q == NULL) {
         tsp = NULL;
     } else {
-        min_timeout = (_ST_SLEEPQ->due <= _ST_LAST_CLOCK) ? 0 : (_ST_SLEEPQ->due - _ST_LAST_CLOCK);
+        min_timeout = (_st_this_vp.sleep_q->due <= _st_this_vp.last_clock) ? 0 : (_st_this_vp.sleep_q->due - _st_this_vp.last_clock);
         timeout.tv_sec  = (time_t) (min_timeout / 1000000);
         timeout.tv_nsec = (long) ((min_timeout % 1000000) * 1000);
         tsp = &timeout;
@@ -883,7 +748,7 @@ ST_HIDDEN void _st_kq_dispatch(void)
 
         _st_kq_data->dellist_cnt = 0;
 
-        for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
+        for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
             pq = _ST_POLLQUEUE_PTR(q);
             notify = 0;
             epds = pq->pds + pq->npds;
@@ -904,7 +769,7 @@ ST_HIDDEN void _st_kq_dispatch(void)
                 }
             }
             if (notify) {
-                ST_REMOVE_LINK(&pq->links);
+                st_clist_remove(&pq->links);
                 pq->on_ioq = 0;
                 for (pds = pq->pds; pds < epds; pds++) {
                     osfd = pds->fd;
@@ -930,9 +795,9 @@ ST_HIDDEN void _st_kq_dispatch(void)
                 }
 
                 if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
-                    _ST_DEL_SLEEPQ(pq->thread);
+                    _st_del_sleep_q(pq->thread);
                 pq->thread->state = _ST_ST_RUNNABLE;
-                _ST_ADD_RUNQ(pq->thread);
+                st_clist_insert_before(&pq->thread->links, &_st_this_vp.run_q);
             }
         }
 
@@ -948,7 +813,6 @@ ST_HIDDEN void _st_kq_dispatch(void)
             osfd = _st_kq_data->evtlist[i].ident;
             _ST_KQ_REVENTS(osfd) = 0;
         }
-
     } else if (nfd < 0) {
         if (errno == EBADF && _st_kq_data->pid != getpid()) {
             /* We probably forked, reinitialize kqueue */
@@ -960,7 +824,7 @@ ST_HIDDEN void _st_kq_dispatch(void)
             _st_kq_data->pid = getpid();
             /* Re-register all descriptors on ioq with new kqueue */
             memset(_st_kq_data->fd_data, 0, _st_kq_data->fd_data_size * sizeof(_kq_fd_data_t));
-            for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
+            for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
                 pq = _ST_POLLQUEUE_PTR(q);
                 _st_kq_pollset_add(pq->pds, pq->npds);
             }
@@ -993,6 +857,11 @@ ST_HIDDEN int _st_kq_fd_getlimit(void)
     return 0;
 }
 
+ST_HIDDEN void _st_kq_destroy(void)
+{
+    /* TODO: FIXME: Implements it */
+}
+
 static _st_eventsys_t _st_kq_eventsys = {
     "kqueue",
     ST_EVENTSYS_ALT,
@@ -1002,7 +871,8 @@ static _st_eventsys_t _st_kq_eventsys = {
     _st_kq_pollset_del,
     _st_kq_fd_new,
     _st_kq_fd_close,  
-    _st_kq_fd_getlimit
+    _st_kq_fd_getlimit,
+    _st_kq_destroy
 };
 #endif  /* MD_HAVE_KQUEUE */
 
@@ -1011,7 +881,6 @@ static _st_eventsys_t _st_kq_eventsys = {
 /*****************************************
  * epoll event system
  */
-
 ST_HIDDEN int _st_epoll_init(void)
 {
     int fdlim;
@@ -1019,37 +888,43 @@ ST_HIDDEN int _st_epoll_init(void)
     int rv = 0;
 
     _st_epoll_data = (struct _st_epolldata *) calloc(1, sizeof(*_st_epoll_data));
-    if (!_st_epoll_data)
-        return -1;
+    if (!_st_epoll_data) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     fdlim = st_getfdlimit();
     _st_epoll_data->fd_hint = (fdlim > 0 && fdlim < ST_EPOLL_EVTLIST_SIZE) ? fdlim : ST_EPOLL_EVTLIST_SIZE;
 
+    /* GCOVR_EXCL_START */
     if ((_st_epoll_data->epfd = epoll_create(_st_epoll_data->fd_hint)) < 0) {
         err = errno;
         rv = -1;
         goto cleanup_epoll;
     }
+    /* GCOVR_EXCL_STOP */
     fcntl(_st_epoll_data->epfd, F_SETFD, FD_CLOEXEC);
-    _st_epoll_data->pid = getpid();
 
     /* Allocate file descriptor data array */
     _st_epoll_data->fd_data_size = _st_epoll_data->fd_hint;
     _st_epoll_data->fd_data = (_epoll_fd_data_t *)calloc(_st_epoll_data->fd_data_size, sizeof(_epoll_fd_data_t));
+    /* GCOVR_EXCL_START */
     if (!_st_epoll_data->fd_data) {
         err = errno;
         rv = -1;
         goto cleanup_epoll;
     }
+    /* GCOVR_EXCL_STOP */
 
     /* Allocate event lists */
     _st_epoll_data->evtlist_size = _st_epoll_data->fd_hint;
     _st_epoll_data->evtlist = (struct epoll_event *)malloc(_st_epoll_data->evtlist_size * sizeof(struct epoll_event));
+    /* GCOVR_EXCL_START */
     if (!_st_epoll_data->evtlist) {
         err = errno;
         rv = -1;
     }
+    /* GCOVR_EXCL_STOP */
 
+    /* GCOVR_EXCL_START */
  cleanup_epoll:
     if (rv < 0) {
         if (_st_epoll_data->epfd >= 0)
@@ -1061,6 +936,7 @@ ST_HIDDEN int _st_epoll_init(void)
         errno = err;
     }
 
+    /* GCOVR_EXCL_STOP */
     return rv;
 }
 
@@ -1073,8 +949,8 @@ ST_HIDDEN int _st_epoll_fd_data_expand(int maxfd)
         n <<= 1;
 
     ptr = (_epoll_fd_data_t *)realloc(_st_epoll_data->fd_data, n * sizeof(_epoll_fd_data_t));
-    if (!ptr)
-        return -1;
+    if (!ptr) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     memset(ptr + _st_epoll_data->fd_data_size, 0, (n - _st_epoll_data->fd_data_size) * sizeof(_epoll_fd_data_t));
 
@@ -1152,8 +1028,8 @@ ST_HIDDEN int _st_epoll_pollset_add(struct pollfd *pds, int npds)
             errno = EINVAL;
             return -1;
         }
-        if (fd >= _st_epoll_data->fd_data_size && _st_epoll_fd_data_expand(fd) < 0)
-            return -1;
+        if (fd >= _st_epoll_data->fd_data_size && _st_epoll_fd_data_expand(fd) < 0) /* GCOVR_EXCL_BR_LINE */
+            return -1; /* GCOVR_EXCL_LINE */
     }
 
     for (i = 0; i < npds; i++) {
@@ -1205,35 +1081,40 @@ ST_HIDDEN void _st_epoll_dispatch(void)
     int events, op;
     short revents;
 
-    if (_ST_SLEEPQ == NULL) {
+    #if defined(DEBUG) && defined(DEBUG_STATS)
+    ++_st_stat_epoll;
+    #endif
+
+    if (_st_this_vp.sleep_q == NULL) {
         timeout = -1;
     } else {
-        min_timeout = (_ST_SLEEPQ->due <= _ST_LAST_CLOCK) ? 0 : (_ST_SLEEPQ->due - _ST_LAST_CLOCK);
+        min_timeout = (_st_this_vp.sleep_q->due <= _st_this_vp.last_clock) ? 0 : (_st_this_vp.sleep_q->due - _st_this_vp.last_clock);
         timeout = (int) (min_timeout / 1000);
-    }
 
-    if (_st_epoll_data->pid != getpid()) {
-        /* We probably forked, reinitialize epoll set */
-        close(_st_epoll_data->epfd);
-        _st_epoll_data->epfd = epoll_create(_st_epoll_data->fd_hint);
-        if (_st_epoll_data->epfd < 0) {
-            /* There is nothing we can do here, will retry later */
-            return;
-        }
-        fcntl(_st_epoll_data->epfd, F_SETFD, FD_CLOEXEC);
-        _st_epoll_data->pid = getpid();
+        // At least wait 1ms when <1ms, to avoid epoll_wait spin loop.
+        if (timeout == 0) {
+            #if defined(DEBUG) && defined(DEBUG_STATS)
+            ++_st_stat_epoll_zero;
+            #endif
 
-        /* Put all descriptors on ioq into new epoll set */
-        memset(_st_epoll_data->fd_data, 0, _st_epoll_data->fd_data_size * sizeof(_epoll_fd_data_t));
-        _st_epoll_data->evtlist_cnt = 0;
-        for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
-            pq = _ST_POLLQUEUE_PTR(q);
-            _st_epoll_pollset_add(pq->pds, pq->npds);
+            if (min_timeout > 0) {
+                #if defined(DEBUG) && defined(DEBUG_STATS)
+                ++_st_stat_epoll_shake;
+                #endif
+
+                timeout = 1;
+            }
         }
     }
 
     /* Check for I/O operations */
     nfd = epoll_wait(_st_epoll_data->epfd, _st_epoll_data->evtlist, _st_epoll_data->evtlist_size, timeout);
+
+    #if defined(DEBUG) && defined(DEBUG_STATS)
+    if (nfd <= 0) {
+        ++_st_stat_epoll_spin;
+    }
+    #endif
 
     if (nfd > 0) {
         for (i = 0; i < nfd; i++) {
@@ -1245,7 +1126,7 @@ ST_HIDDEN void _st_epoll_dispatch(void)
             }
         }
 
-        for (q = _ST_IOQ.next; q != &_ST_IOQ; q = q->next) {
+        for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
             pq = _ST_POLLQUEUE_PTR(q);
             notify = 0;
             epds = pq->pds + pq->npds;
@@ -1275,7 +1156,7 @@ ST_HIDDEN void _st_epoll_dispatch(void)
                 }
             }
             if (notify) {
-                ST_REMOVE_LINK(&pq->links);
+                st_clist_remove(&pq->links);
                 pq->on_ioq = 0;
                 /*
                  * Here we will only delete/modify descriptors that
@@ -1284,9 +1165,9 @@ ST_HIDDEN void _st_epoll_dispatch(void)
                 _st_epoll_pollset_del(pq->pds, pq->npds);
 
                 if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
-                    _ST_DEL_SLEEPQ(pq->thread);
+                    _st_del_sleep_q(pq->thread);
                 pq->thread->state = _ST_ST_RUNNABLE;
-                _ST_ADD_RUNQ(pq->thread);
+                st_clist_insert_before(&pq->thread->links, &_st_this_vp.run_q);
             }
         }
 
@@ -1307,8 +1188,8 @@ ST_HIDDEN void _st_epoll_dispatch(void)
 
 ST_HIDDEN int _st_epoll_fd_new(int osfd)
 {
-    if (osfd >= _st_epoll_data->fd_data_size && _st_epoll_fd_data_expand(osfd) < 0)
-        return -1;
+    if (osfd >= _st_epoll_data->fd_data_size && _st_epoll_fd_data_expand(osfd) < 0) /* GCOVR_EXCL_BR_LINE */
+        return -1; /* GCOVR_EXCL_LINE */
 
     return 0;   
 }
@@ -1344,6 +1225,17 @@ ST_HIDDEN int _st_epoll_is_supported(void)
     return (errno != ENOSYS);
 }
 
+ST_HIDDEN void _st_epoll_destroy(void)
+{
+    if (_st_epoll_data->epfd >= 0) {
+        close(_st_epoll_data->epfd);
+    }
+    free(_st_epoll_data->fd_data);
+    free(_st_epoll_data->evtlist);
+    free(_st_epoll_data);
+    _st_epoll_data = NULL;
+}
+
 static _st_eventsys_t _st_epoll_eventsys = {
     "epoll",
     ST_EVENTSYS_ALT,
@@ -1353,9 +1245,283 @@ static _st_eventsys_t _st_epoll_eventsys = {
     _st_epoll_pollset_del,
     _st_epoll_fd_new,
     _st_epoll_fd_close,
-    _st_epoll_fd_getlimit
+    _st_epoll_fd_getlimit,
+    _st_epoll_destroy
 };
 #endif  /* MD_HAVE_EPOLL */
+
+
+#if defined (WIN64)
+/*****************************************
+ * Native Windows event system with WSAPoll, for features, not performance.
+ * WSAPoll polls sockets only, has no POLLPRI, and fails instead of sleeping when
+ * given no sockets. Before Windows 10 2004, it does not report a failed connect,
+ * so such a connect waits until its timeout.
+ */
+
+static __thread struct _st_wsapolldata {
+    WSAPOLLFD *fds;
+    int fds_size;
+} *_st_wsapoll_data;
+
+ST_HIDDEN int _st_win64_init(void)
+{
+    _st_wsapoll_data = (struct _st_wsapolldata *) calloc(1, sizeof(*_st_wsapoll_data));
+    if (!_st_wsapoll_data) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    return 0;
+}
+
+/* The WSAPoll timeout in milliseconds until the earliest sleeper is due, or -1 for none. */
+static int _st_win64_timeout_ms(void)
+{
+    st_utime_t min_timeout;
+
+    if (_st_this_vp.sleep_q == NULL)
+        return -1;
+
+    min_timeout = (_st_this_vp.sleep_q->due <= _st_this_vp.last_clock) ? 0 :
+                  (_st_this_vp.sleep_q->due - _st_this_vp.last_clock);
+    /* Round up to milliseconds, so the sleeper is due when the dispatch returns. */
+    min_timeout = (min_timeout + 999) / 1000;
+    return (min_timeout >= INT_MAX) ? INT_MAX : (int) min_timeout;
+}
+
+/* The ST events of one WSAPoll result, like the epoll backend: an error or hang-up also wakes every waiter. */
+static short _st_win64_revents(short events, short r)
+{
+    short revents = 0;
+
+    if (r & (POLLERR | POLLHUP | POLLNVAL))
+        revents |= events;
+    if ((events & POLLIN) && (r & POLLIN))
+        revents |= POLLIN;
+    if ((events & POLLOUT) && (r & POLLOUT))
+        revents |= POLLOUT;
+    revents |= r & (POLLERR | POLLHUP | POLLNVAL);
+
+    return revents;
+}
+
+/* Wake the thread of a pollset whose descriptors are ready. */
+static void _st_win64_notify(_st_pollq_t *pq)
+{
+    st_clist_remove(&pq->links);
+    pq->on_ioq = 0;
+
+    if (pq->thread->flags & _ST_FL_ON_SLEEPQ)
+        _st_del_sleep_q(pq->thread);
+    pq->thread->state = _ST_ST_RUNNABLE;
+    st_clist_insert_before(&pq->thread->links, &_st_this_vp.run_q);
+}
+
+/* The whole WSAPoll failed, which a closed descriptor may cause: wake the pollsets with one, with POLLNVAL. */
+static void _st_win64_find_bad_fd(void)
+{
+    _st_clist_t *q;
+    _st_pollq_t *pq;
+    struct pollfd *pds, *epds;
+    int notify, type;
+    socklen_t len;
+
+    for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
+        pq = _ST_POLLQUEUE_PTR(q);
+        notify = 0;
+        epds = pq->pds + pq->npds;
+
+        for (pds = pq->pds; pds < epds; pds++) {
+            pds->revents = 0;
+            len = sizeof(type);
+            if (getsockopt((SOCKET)(intptr_t) pds->fd, SOL_SOCKET, SO_TYPE, (char *) &type, &len) != 0) {
+                pds->revents = POLLNVAL;
+                notify = 1;
+            }
+        }
+
+        if (notify)
+            _st_win64_notify(pq);
+    }
+}
+
+ST_HIDDEN void _st_win64_dispatch(void)
+{
+    _st_clist_t *q;
+    _st_pollq_t *pq;
+    struct pollfd *pds, *epds;
+    WSAPOLLFD *fds;
+    int n, i, nfd, notify, ms;
+
+    /* Count the descriptors of every pollset on the I/O queue, and grow the array for them. */
+    n = 0;
+    for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next)
+        n += _ST_POLLQUEUE_PTR(q)->npds;
+
+    if (n > _st_wsapoll_data->fds_size) {
+        fds = (WSAPOLLFD *) realloc(_st_wsapoll_data->fds, n * sizeof(WSAPOLLFD));
+        if (fds) {
+            _st_wsapoll_data->fds = fds;
+            _st_wsapoll_data->fds_size = n;
+        } else {
+            /* Out of memory: wait for the sleepers only, and try again next time. */
+            n = 0;
+        }
+    }
+
+    ms = _st_win64_timeout_ms();
+    if (n == 0) {
+        /* Nothing to poll, so only a timeout can wake a thread, like select() with no descriptors. */
+        Sleep(ms < 0 ? INFINITE : (DWORD) ms);
+        return;
+    }
+
+    fds = _st_wsapoll_data->fds;
+    i = 0;
+    for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
+        pq = _ST_POLLQUEUE_PTR(q);
+        epds = pq->pds + pq->npds;
+        for (pds = pq->pds; pds < epds; pds++, i++) {
+            fds[i].fd = (SOCKET)(intptr_t) pds->fd;
+            fds[i].events = pds->events;
+            fds[i].revents = 0;
+        }
+    }
+
+    /* Check for I/O operations */
+    nfd = WSAPoll(fds, (ULONG) n, ms);
+
+    /* Notify threads that are associated with the selected descriptors, in the order the array was built. */
+    if (nfd > 0) {
+        i = 0;
+        for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; ) {
+            pq = _ST_POLLQUEUE_PTR(q);
+            q = q->next;
+            notify = 0;
+            epds = pq->pds + pq->npds;
+            for (pds = pq->pds; pds < epds; pds++, i++) {
+                pds->revents = _st_win64_revents(pds->events, fds[i].revents);
+                if (pds->revents)
+                    notify = 1;
+            }
+            if (notify)
+                _st_win64_notify(pq);
+        }
+    } else if (nfd < 0) {
+        if (WSAGetLastError() == WSAENOTSOCK)
+            _st_win64_find_bad_fd();
+    }
+}
+
+ST_HIDDEN int _st_win64_pollset_add(struct pollfd *pds, int npds)
+{
+    struct pollfd *pd;
+    struct pollfd *epd = pds + npds;
+
+    /*
+     * Do checks up front, like the select backend. Winsock's pollfd has an unsigned SOCKET, so a negative
+     * descriptor is checked as the int ST keeps. Winsock's POLLIN is POLLRDNORM | POLLRDBAND, so a part of it, such
+     * as POLLRDNORM from a program written for poll(2), is refused too, and so is POLLPRI.
+     */
+    for (pd = pds; pd < epd; pd++) {
+        if ((int) pd->fd < 0 || !pd->events || (pd->events & ~(POLLIN | POLLOUT)) ||
+            ((pd->events & POLLIN) && (pd->events & POLLIN) != POLLIN)) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    /* Registered by the pollset on the I/O queue. */
+    return 0;
+}
+
+ST_HIDDEN void _st_win64_pollset_del(struct pollfd *pds, int npds)
+{
+    /* Unregistered by removing the pollset from the I/O queue. */
+    (void) pds;
+    (void) npds;
+}
+
+ST_HIDDEN int _st_win64_fd_new(int osfd)
+{
+    int type;
+    socklen_t len = sizeof(type);
+
+    /* WSAPoll polls only sockets, so anything else, such as a closed socket, is a bad descriptor. */
+    if (getsockopt((SOCKET)(intptr_t) osfd, SOL_SOCKET, SO_TYPE, (char *) &type, &len) != 0) {
+        errno = EBADF;
+        return -1;
+    }
+
+    return 0;
+}
+
+ST_HIDDEN int _st_win64_fd_close(int osfd)
+{
+    _st_clist_t *q;
+    _st_pollq_t *pq;
+    struct pollfd *pds, *epds;
+
+    for (q = _st_this_vp.io_q.next; q != &_st_this_vp.io_q; q = q->next) {
+        pq = _ST_POLLQUEUE_PTR(q);
+        epds = pq->pds + pq->npds;
+        for (pds = pq->pds; pds < epds; pds++) {
+            if ((int) pds->fd == osfd) {
+                errno = EBUSY;
+                return -1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+ST_HIDDEN int _st_win64_fd_getlimit(void)
+{
+    /* No limit of the event system itself. */
+    return 0;
+}
+
+ST_HIDDEN void _st_win64_destroy(void)
+{
+    if (_st_wsapoll_data) {
+        free(_st_wsapoll_data->fds);
+        free(_st_wsapoll_data);
+        _st_wsapoll_data = NULL;
+    }
+}
+
+/*
+ * One backend for both choices (D8): ST_EVENTSYS_DEFAULT and ST_EVENTSYS_SELECT give the
+ * select-like default, and ST_EVENTSYS_ALT is accepted, so callers that ask for it work.
+ */
+static _st_eventsys_t _st_win64_eventsys = {
+    "wsapoll",
+    ST_EVENTSYS_SELECT,
+    _st_win64_init,
+    _st_win64_dispatch,
+    _st_win64_pollset_add,
+    _st_win64_pollset_del,
+    _st_win64_fd_new,
+    _st_win64_fd_close,
+    _st_win64_fd_getlimit,
+    _st_win64_destroy
+};
+
+static _st_eventsys_t _st_win64_alt_eventsys = {
+    "wsapoll",
+    ST_EVENTSYS_ALT,
+    _st_win64_init,
+    _st_win64_dispatch,
+    _st_win64_pollset_add,
+    _st_win64_pollset_del,
+    _st_win64_fd_new,
+    _st_win64_fd_close,
+    _st_win64_fd_getlimit,
+    _st_win64_destroy
+};
+#endif  /* WIN64 */
 
 
 /*****************************************
@@ -1369,36 +1535,38 @@ int st_set_eventsys(int eventsys)
         return -1;
     }
 
-    switch (eventsys) {
-    case ST_EVENTSYS_DEFAULT:
-#ifdef USE_POLL
-        _st_eventsys = &_st_poll_eventsys;
-#else
+#if defined (WIN64)
+    if (eventsys == ST_EVENTSYS_SELECT || eventsys == ST_EVENTSYS_DEFAULT) {
+        _st_eventsys = &_st_win64_eventsys;
+        return 0;
+    }
+    if (eventsys == ST_EVENTSYS_ALT) {
+        _st_eventsys = &_st_win64_alt_eventsys;
+        return 0;
+    }
+#endif
+
+    if (eventsys == ST_EVENTSYS_SELECT || eventsys == ST_EVENTSYS_DEFAULT) {
+#if defined (MD_HAVE_SELECT)
         _st_eventsys = &_st_select_eventsys;
+        return 0;
 #endif
-        break;
-    case ST_EVENTSYS_SELECT:
-        _st_eventsys = &_st_select_eventsys;
-        break;
-#ifdef MD_HAVE_POLL
-    case ST_EVENTSYS_POLL:
-        _st_eventsys = &_st_poll_eventsys;
-        break;
-#endif
-    case ST_EVENTSYS_ALT:
-#if defined (MD_HAVE_KQUEUE)
-        _st_eventsys = &_st_kq_eventsys;
-#elif defined (MD_HAVE_EPOLL)
-        if (_st_epoll_is_supported())
-            _st_eventsys = &_st_epoll_eventsys;
-#endif
-        break;
-    default:
-        errno = EINVAL;
-        return -1;
     }
 
-    return 0;
+    if (eventsys == ST_EVENTSYS_ALT) {
+#if defined (MD_HAVE_KQUEUE)
+        _st_eventsys = &_st_kq_eventsys;
+        return 0;
+#elif defined (MD_HAVE_EPOLL)
+        if (_st_epoll_is_supported()) {
+            _st_eventsys = &_st_epoll_eventsys;
+            return 0;
+        }
+#endif
+    }
+
+    errno = EINVAL;
+    return -1;
 }
 
 int st_get_eventsys(void)

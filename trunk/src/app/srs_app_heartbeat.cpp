@@ -1,47 +1,47 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_heartbeat.hpp>
 
 #include <sstream>
 using namespace std;
 
-#include <srs_kernel_error.hpp>
-#include <srs_kernel_log.hpp>
 #include <srs_app_config.hpp>
+#include <srs_app_factory.hpp>
 #include <srs_app_http_client.hpp>
-#include <srs_protocol_json.hpp>
+#include <srs_app_http_conn.hpp>
+#include <srs_app_statistic.hpp>
 #include <srs_app_utility.hpp>
 #include <srs_core_autofree.hpp>
-#include <srs_app_http_conn.hpp>
+#include <srs_kernel_error.hpp>
+#include <srs_kernel_log.hpp>
+#include <srs_kernel_utility.hpp>
 #include <srs_protocol_amf0.hpp>
+#include <srs_protocol_json.hpp>
+
+ISrsHttpHeartbeat::ISrsHttpHeartbeat()
+{
+}
+
+ISrsHttpHeartbeat::~ISrsHttpHeartbeat()
+{
+}
 
 SrsHttpHeartbeat::SrsHttpHeartbeat()
 {
+    config_ = _srs_config;
+    app_factory_ = _srs_app_factory;
+    stat_ = _srs_stat;
 }
 
 SrsHttpHeartbeat::~SrsHttpHeartbeat()
 {
+    config_ = NULL;
+    app_factory_ = NULL;
+    stat_ = NULL;
 }
 
 void SrsHttpHeartbeat::heartbeat()
@@ -57,52 +57,142 @@ void SrsHttpHeartbeat::heartbeat()
 srs_error_t SrsHttpHeartbeat::do_heartbeat()
 {
     srs_error_t err = srs_success;
-    
-    std::string url = _srs_config->get_heartbeat_url();
-    
+
+    std::string url = config_->get_heartbeat_url();
+
     SrsHttpUri uri;
     if ((err = uri.initialize(url)) != srs_success) {
         return srs_error_wrap(err, "http uri parse hartbeart url failed. url=%s", url.c_str());
     }
-    
-    std::string ip = "";
-    std::string device_id = _srs_config->get_heartbeat_device_id();
-    
-    vector<string>& ips = srs_get_local_ips();
-    if (!ips.empty()) {
-        ip = ips[_srs_config->get_stats_network() % (int)ips.size()];
+
+    string ip;
+    std::string device_id = config_->get_heartbeat_device_id();
+
+    // Try to load the ip from the environment variable.
+    ip = srs_getenv("srs.device.ip"); // SRS_DEVICE_IP
+    if (ip.empty()) {
+        // Use the local ip address specified by the stats.network config.
+        SrsProtocolUtility utility;
+        vector<SrsIPAddress *> &ips = utility.local_ips();
+        if (!ips.empty()) {
+            ip = ips[config_->get_stats_network() % (int)ips.size()]->ip_;
+        }
     }
-    
-    SrsJsonObject* obj = SrsJsonAny::object();
-    SrsAutoFree(SrsJsonObject, obj);
-    
+
+    SrsUniquePtr<SrsJsonObject> obj(SrsJsonAny::object());
+
     obj->set("device_id", SrsJsonAny::str(device_id.c_str()));
     obj->set("ip", SrsJsonAny::str(ip.c_str()));
-    
-    if (_srs_config->get_heartbeat_summaries()) {
-        SrsJsonObject* summaries = SrsJsonAny::object();
+
+    obj->set("server", SrsJsonAny::str(stat_->server_id().c_str()));
+    obj->set("service", SrsJsonAny::str(stat_->service_id().c_str()));
+    obj->set("pid", SrsJsonAny::str(stat_->service_pid().c_str()));
+
+    if (config_->get_heartbeat_summaries()) {
+        SrsJsonObject *summaries = SrsJsonAny::object();
         obj->set("summaries", summaries);
-        
-        srs_api_dump_summaries(summaries);
+
+        srs_api_dump_summaries(config_, summaries);
     }
-    
-    SrsHttpClient http;
-    if ((err = http.initialize(uri.get_host(), uri.get_port())) != srs_success) {
+
+    if (config_->get_heartbeat_ports()) {
+        // For RTMP listen endpoints.
+        if (true) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("rtmp", o);
+
+            vector<string> endpoints = config_->get_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                o->append(SrsJsonAny::str(endpoints.at(i).c_str()));
+            }
+        }
+
+        // For HTTP Stream listen endpoints.
+        if (config_->get_http_stream_enabled()) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("http", o);
+
+            vector<string> endpoints = config_->get_http_stream_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                o->append(SrsJsonAny::str(endpoints.at(i).c_str()));
+            }
+        }
+
+        // For HTTP API listen endpoints.
+        if (config_->get_http_api_enabled()) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("api", o);
+
+            vector<string> endpoints = config_->get_http_api_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                o->append(SrsJsonAny::str(endpoints.at(i).c_str()));
+            }
+        }
+
+        // For SRT listen endpoints.
+        if (config_->get_srt_enabled()) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("srt", o);
+
+            vector<string> endpoints = config_->get_srt_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                o->append(SrsJsonAny::str(endpoints.at(i).c_str()));
+            }
+        }
+
+        // For RTSP listen endpoints.
+        if (config_->get_rtsp_server_enabled()) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("rtsp", o);
+
+            vector<string> endpoints = config_->get_rtsp_server_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                o->append(SrsJsonAny::str(endpoints.at(i).c_str()));
+            }
+        }
+
+        // For WebRTC listen endpoints.
+        if (config_->get_rtc_server_enabled()) {
+            SrsJsonArray *o = SrsJsonAny::array();
+            obj->set("rtc", o);
+
+            vector<string> endpoints = config_->get_rtc_server_listens();
+            for (int i = 0; i < (int)endpoints.size(); i++) {
+                string endpoint = srs_fmt_sprintf("udp://%s", endpoints.at(i).c_str());
+                o->append(SrsJsonAny::str(endpoint.c_str()));
+            }
+
+            if (config_->get_rtc_server_tcp_enabled()) {
+                vector<string> endpoints = config_->get_rtc_server_tcp_listens();
+                for (int i = 0; i < (int)endpoints.size(); i++) {
+                    string endpoint = srs_fmt_sprintf("tcp://%s", endpoints.at(i).c_str());
+                    o->append(SrsJsonAny::str(endpoint.c_str()));
+                }
+            }
+        }
+    }
+
+    SrsUniquePtr<ISrsHttpClient> http(app_factory_->create_http_client());
+    if ((err = http->initialize(uri.get_schema(), uri.get_host(), uri.get_port())) != srs_success) {
         return srs_error_wrap(err, "init uri=%s", uri.get_url().c_str());
     }
-    
+
+    if (config_->get_heartbeat_auth_enabled() && config_->get_heartbeat_auth_type() == "bearer") {
+        http->set_header("Authorization", "Bearer " + config_->get_heartbeat_auth_token());
+    }
+
     std::string req = obj->dumps();
-    ISrsHttpMessage* msg = NULL;
-    if ((err = http.post(uri.get_path(), req, &msg)) != srs_success) {
+    ISrsHttpMessage *msg_raw = NULL;
+    if ((err = http->post(uri.get_request_target(), req, &msg_raw)) != srs_success) {
         return srs_error_wrap(err, "http post hartbeart uri failed. url=%s, request=%s", url.c_str(), req.c_str());
     }
-    SrsAutoFree(ISrsHttpMessage, msg);
-    
+
+    SrsUniquePtr<ISrsHttpMessage> msg(msg_raw);
+
     std::string res;
     if ((err = msg->body_read_all(res)) != srs_success) {
         return srs_error_wrap(err, "read body");
     }
-    
+
     return err;
 }
-

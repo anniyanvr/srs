@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_ASYNC_CALL_HPP
 #define SRS_APP_ASYNC_CALL_HPP
@@ -29,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include <srs_app_thread.hpp>
+#include <srs_app_st.hpp>
 
 // The async call for http hooks, for the http hooks will switch st-thread,
 // so we must use isolate thread to avoid the thread corrupt,
@@ -41,6 +24,7 @@ class ISrsAsyncCallTask
 public:
     ISrsAsyncCallTask();
     virtual ~ISrsAsyncCallTask();
+
 public:
     // Execute the task async.
     // This method is the actual execute method of task,
@@ -51,32 +35,52 @@ public:
     virtual std::string to_string() = 0;
 };
 
+// The async call worker, used to execute the task in async mode.
+class ISrsAsyncCallWorker
+{
+public:
+    ISrsAsyncCallWorker();
+    virtual ~ISrsAsyncCallWorker();
+
+public:
+    virtual srs_error_t execute(ISrsAsyncCallTask *t) = 0;
+    virtual srs_error_t start() = 0;
+    virtual void stop() = 0;
+};
+
 // The async callback for dvr, callback and other async worker.
 // When worker call with the task, the worker will do it in isolate thread.
 // That is, the task is execute/call in async mode.
-class SrsAsyncCallWorker : public ISrsCoroutineHandler
+class SrsAsyncCallWorker : public ISrsCoroutineHandler, public ISrsAsyncCallWorker
 {
-private:
-    SrsCoroutine* trd;
-protected:
-    std::vector<ISrsAsyncCallTask*> tasks;
-    srs_cond_t wait;
-    srs_mutex_t lock;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsCoroutine *trd_;
+
+// clang-format off
+SRS_DECLARE_PROTECTED: // clang-format on
+    std::vector<ISrsAsyncCallTask *> tasks_;
+    srs_cond_t wait_;
+    srs_mutex_t lock_;
+
 public:
     SrsAsyncCallWorker();
     virtual ~SrsAsyncCallWorker();
+
 public:
-    virtual srs_error_t execute(ISrsAsyncCallTask* t);
+    virtual srs_error_t execute(ISrsAsyncCallTask *t);
     virtual int count();
+
 public:
     virtual srs_error_t start();
     virtual void stop();
-// Interface ISrsReusableThreadHandler
+    // Interface ISrsReusableThreadHandler
 public:
     virtual srs_error_t cycle();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual void flush_tasks();
 };
 
 #endif
-

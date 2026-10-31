@@ -1,32 +1,14 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_HTTP_API_HPP
 #define SRS_APP_HTTP_API_HPP
 
 #include <srs_core.hpp>
 
-class SrsStSocket;
 class ISrsHttpMessage;
 class SrsHttpParser;
 class SrsHttpHandler;
@@ -34,288 +16,390 @@ class SrsServer;
 class SrsRtcServer;
 class SrsJsonObject;
 class SrsSdp;
-class SrsRequest;
+class ISrsRequest;
+class ISrsHttpResponseWriter;
+class SrsHttpConn;
+class ISrsSignalHandler;
+class ISrsStatistic;
+class ISrsReloadStatus;
+class ISrsAppConfig;
+class ISrsCoWorkers;
 
-#include <srs_app_st.hpp>
-#include <srs_app_conn.hpp>
-#include <srs_http_stack.hpp>
+#include <string>
+
+#include <srs_app_http_conn.hpp>
 #include <srs_app_reload.hpp>
+#include <srs_app_st.hpp>
+#include <srs_protocol_conn.hpp>
+#include <srs_protocol_http_stack.hpp>
+
+extern srs_error_t srs_api_response(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, std::string json);
+extern srs_error_t srs_api_response_code(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, int code);
+extern srs_error_t srs_api_response_code(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, srs_error_t code);
+
+// Parse pagination parameters from HTTP request query string.
+// @param r The HTTP request message.
+// @param start Output parameter for start index, defaults to 0, minimum 0.
+// @param count Output parameter for count, defaults to 10, minimum 1.
+extern void srs_api_parse_pagination(ISrsHttpMessage *r, int &start, int &count);
+
+// Escape a label value of the Prometheus text format: a backslash, a double quote and a
+// line feed become \\, \" and \n, so the value can be written between double quotes.
+extern std::string srs_api_metrics_label_escape(const std::string &v);
 
 // For http root.
 class SrsGoApiRoot : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiRoot();
     virtual ~SrsGoApiRoot();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiApi : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiApi();
     virtual ~SrsGoApiApi();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiV1 : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiV1();
     virtual ~SrsGoApiV1();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiVersion : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiVersion();
     virtual ~SrsGoApiVersion();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiSummaries : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+    ISrsAppConfig *config_;
+
 public:
     SrsGoApiSummaries();
     virtual ~SrsGoApiSummaries();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiRusages : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiRusages();
     virtual ~SrsGoApiRusages();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiSelfProcStats : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiSelfProcStats();
     virtual ~SrsGoApiSelfProcStats();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiSystemProcStats : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiSystemProcStats();
     virtual ~SrsGoApiSystemProcStats();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiMemInfos : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiMemInfos();
     virtual ~SrsGoApiMemInfos();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiAuthors : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiAuthors();
     virtual ~SrsGoApiAuthors();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiFeatures : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiFeatures();
     virtual ~SrsGoApiFeatures();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiRequests : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiRequests();
     virtual ~SrsGoApiRequests();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiVhosts : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiVhosts();
     virtual ~SrsGoApiVhosts();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiStreams : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiStreams();
     virtual ~SrsGoApiStreams();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-};
 
-#ifdef SRS_RTC
-class SrsGoApiRtcPlay : public ISrsHttpHandler
-{
 public:
-    static uint32_t ssrc_num;
-private:
-    SrsRtcServer* server_;
-public:
-    SrsGoApiRtcPlay(SrsRtcServer* server);
-    virtual ~SrsGoApiRtcPlay();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-private:
-    virtual srs_error_t do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res);
-    srs_error_t exchange_sdp(SrsRequest* req, const SrsSdp& remote_sdp, SrsSdp& local_sdp);
-    srs_error_t check_remote_sdp(const SrsSdp& remote_sdp);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
-
-class SrsGoApiRtcPublish : public ISrsHttpHandler
-{
-public:
-    static uint32_t ssrc_num;
-private:
-    SrsRtcServer* server_;
-public:
-    SrsGoApiRtcPublish(SrsRtcServer* server);
-    virtual ~SrsGoApiRtcPublish();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-private:
-    virtual srs_error_t do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res);
-    srs_error_t exchange_sdp(SrsRequest* req, const SrsSdp& remote_sdp, SrsSdp& local_sdp);
-    srs_error_t check_remote_sdp(const SrsSdp& remote_sdp);
-};
-
-class SrsGoApiRtcNACK : public ISrsHttpHandler
-{
-private:
-    SrsRtcServer* server_;
-public:
-    SrsGoApiRtcNACK(SrsRtcServer* server);
-    virtual ~SrsGoApiRtcNACK();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-private:
-    virtual srs_error_t do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r, SrsJsonObject* res);
-};
-#endif
 
 class SrsGoApiClients : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiClients();
     virtual ~SrsGoApiClients();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
-class SrsGoApiRaw : virtual public ISrsHttpHandler, virtual public ISrsReloadHandler
+// The read-only API of the forwards of the publishing streams, /api/v1/forwards/[id].
+class SrsGoApiForwards : public ISrsHttpHandler
 {
-private:
-    SrsServer* server;
-private:
-    bool raw_api;
-    bool allow_reload;
-    bool allow_query;
-    bool allow_update;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
-    SrsGoApiRaw(SrsServer* svr);
+    SrsGoApiForwards();
+    virtual ~SrsGoApiForwards();
+
+public:
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
+};
+
+class SrsGoApiRaw : public ISrsHttpHandler, public ISrsReloadHandler
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+    ISrsAppConfig *config_;
+    ISrsReloadStatus *reload_status_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsSignalHandler *handler_;
+
+public:
+    SrsGoApiRaw(ISrsSignalHandler *handler);
+    void assemble();
     virtual ~SrsGoApiRaw();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-// Interface ISrsReloadHandler
-public:
-    virtual srs_error_t on_reload_http_api_raw_api();
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiClusters : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+    ISrsCoWorkers *coworkers_;
+
 public:
     SrsGoApiClusters();
     virtual ~SrsGoApiClusters();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-};
 
-class SrsGoApiPerf : public ISrsHttpHandler
-{
 public:
-    SrsGoApiPerf();
-    virtual ~SrsGoApiPerf();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 class SrsGoApiError : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiError();
     virtual ~SrsGoApiError();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-};
 
-#ifdef SRS_GB28181
-class SrsGoApiGb28181 : public ISrsHttpHandler
-{
 public:
-    SrsGoApiGb28181();
-    virtual ~SrsGoApiGb28181();
-public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-private:
-    virtual srs_error_t do_serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
-#endif
 
 #ifdef SRS_GPERF
 class SrsGoApiTcmalloc : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
 public:
     SrsGoApiTcmalloc();
     virtual ~SrsGoApiTcmalloc();
+
 public:
-    virtual srs_error_t serve_http(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 #endif
 
-class SrsHttpApi : virtual public SrsConnection, virtual public ISrsReloadHandler
+#ifdef SRS_VALGRIND
+class SrsGoApiValgrind : public ISrsHttpHandler, public ISrsCoroutineHandler
 {
-private:
-    SrsHttpParser* parser;
-    SrsHttpCorsMux* cors;
-    SrsHttpServeMux* mux;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsCoroutine *trd_;
+    std::string task_;
+
 public:
-    SrsHttpApi(IConnectionManager* cm, srs_netfd_t fd, SrsHttpServeMux* m, std::string cip);
-    virtual ~SrsHttpApi();
-// Interface ISrsKbpsDelta
+    SrsGoApiValgrind();
+    virtual ~SrsGoApiValgrind();
+
 public:
-    virtual void remark(int64_t* in, int64_t* out);
-protected:
-    virtual srs_error_t do_cycle();
-private:
-    virtual srs_error_t process_request(ISrsHttpResponseWriter* w, ISrsHttpMessage* r);
-// Interface ISrsReloadHandler
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
+    // Interface ISrsCoroutineHandler
 public:
-    virtual srs_error_t on_reload_http_api_crossdomain();
+    virtual srs_error_t cycle();
+};
+#endif
+
+#ifdef SRS_SIGNAL_API
+class SrsGoApiSignal : public ISrsHttpHandler
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+
+public:
+    SrsGoApiSignal();
+    virtual ~SrsGoApiSignal();
+
+public:
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
+};
+#endif
+
+class SrsGoApiMetrics : public ISrsHttpHandler
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsStatistic *stat_;
+    ISrsAppConfig *config_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    bool enabled_;
+    std::string label_;
+    std::string tag_;
+
+public:
+    SrsGoApiMetrics();
+    void assemble();
+    virtual ~SrsGoApiMetrics();
+
+public:
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
 };
 
 #endif
-

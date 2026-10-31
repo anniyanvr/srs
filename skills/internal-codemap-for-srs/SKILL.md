@@ -1,0 +1,62 @@
+---
+name: internal-codemap-for-srs
+description: Use whenever support, development, debugging, review, or maintenance work needs to locate, read, modify, test, or verify SRS or Oryx code. Covers the C++ origin and edge media server, its State Threads dependency, the Go proxy server, browser publishers and players, the SRS Docker image toolchain, and the Oryx Go backend, React dashboard, integrated runtime, packaging, installers, releases, and tests. Used by the support and development skills, which own the user-facing result.
+---
+
+# SRS and Oryx Internal Code Map
+
+Route SRS and Oryx code work to focused codebase maps. The parent skill owns the user-facing task; this skill owns code navigation and verification-file selection.
+
+## Core Rules
+
+- Use the current working directory as the project root. Do not search parent directories or discover alternate repository roots.
+- The only external-repository exceptions are these project-root-relative paths. Keep the current working directory unchanged, do not resolve any of these symlinks, and do not search for alternate checkouts.
+  - Dev Docker through `dev-docker/`
+  - Oryx through `oryx/`
+  - State Threads through `state-threads/`
+- Use the Reference Router before reading, searching, or modifying code, configuration, tests, or verification scripts.
+- Treat only files and module directories listed by the selected reference as trusted navigation scope.
+- Never grep a repository root or broad trees such as `trunk/src/`, `cmd/`, `internal/`, `oryx/platform/`, or `oryx/ui/`.
+- When a selected reference lists a module directory rather than every file, list filenames only inside that module, choose the smallest relevant set, then read or search only those files.
+- If no route covers the task, report that the code router does not cover it. Do not discover a new route ad hoc.
+- Use `skills/internal-docs-for-srs/SKILL.md` for project documentation. Do not route documentation here.
+
+## Path Resolution
+
+- Resolve bundled paths beginning with `references/`, `scripts/`, `assets/`, or `agents/` relative to the directory containing this `SKILL.md`, not the current working directory.
+- Resolve repository paths such as `trunk/`, `internal/`, `cmd/`, or `skills/` relative to the current working directory.
+- Resolve files selected by `references/dev-docker.md` through the project-root-relative `dev-docker/` path while keeping the current working directory unchanged. The path may be a directory or a symlink to the user's preferred checkout. If it is unavailable, ask the user to make the `https://github.com/ossrs/dev-docker` checkout available there; do not create it automatically.
+- Resolve files selected by `references/oryx.md` through the project-root-relative `oryx/` path while keeping the current working directory unchanged. The path may be a directory or a symlink to the user's preferred checkout. If it is unavailable, ask the user to make the `https://github.com/ossrs/oryx` checkout available there; do not create it automatically.
+- Resolve files selected by `references/state-threads.md` through the project-root-relative `state-threads/` path while keeping the current working directory unchanged. The path may be a directory or a symlink to the user's preferred checkout. If it is unavailable, ask the user to make the `https://github.com/ossrs/state-threads` checkout available there; do not create it automatically.
+- Use the currently invoked skill directory. Do not search for alternate copies under tool-specific directories such as `.agents/`, `.kiro/`, or `.claude/`.
+- Before reporting a routed file as missing, check its fully resolved path directly.
+
+## Reference Router
+
+| Code area | Use when | Load |
+|---|---|---|
+| C++ media server | The task concerns the C++ origin or edge server, `trunk/src/`, `trunk/conf/`, protocols, media processing, or its unit, black-box, E2E, or benchmark tests | `references/cpp-server.md` |
+| State Threads | The task concerns `ossrs/state-threads`, `state-threads/`, its vendored mirror `trunk/3rdparty/st-srs/`, coroutine scheduling, stacks, context-switch assembly, or ST tests | `references/state-threads.md` |
+| Go proxy server | The task concerns the Go proxy, `cmd/`, or `internal/` | `references/go-server.md` |
+| Browser publishers and players | The task concerns browser publishing or playback with WHIP, WHEP, HTTP-FLV, or HLS, including code under `trunk/research/players/` | `references/browser-clients.md` |
+| SRS Docker build images | The task concerns `ossrs/dev-docker`, Docker dependency or cache images, packaged FFmpeg and other build tools, image branches, or how the SRS release image receives those tools | `references/dev-docker.md` |
+| Oryx integrated video solution | The task concerns `ossrs/oryx`, `oryx/`, its Go platform, React dashboard, SRS/Redis runtime integration, Docker image, installers, release service, or integration tests | `references/oryx.md` |
+
+For a comparison or migration between the C++ media server and the Go proxy, load both server maps. For work crossing standalone SRS and Oryx, load the Oryx map and only the smallest responsible SRS map.
+
+## Workflow
+
+1. Classify the request as C++ media server, State Threads, Go proxy server, browser publishers and players, SRS Docker build images, Oryx integrated video solution, or an explicit combination.
+2. If the product or server is unclear and choosing incorrectly could change the result, ask the user to clarify. Do not guess whether the task targets standalone SRS or Oryx.
+3. Resolve the selected path according to [Path Resolution](#path-resolution), then load the reference file or files.
+4. Use their descriptions to identify the responsible module and the smallest relevant file set.
+5. Read or search only those files. Add a second routed module only when evidence shows a dependency crosses the first module boundary.
+6. Return control to the parent skill for support, development, debugging, review, or maintenance.
+
+## Maintaining the Router
+
+- Add, remove, or rename code modules and trusted files in exactly one server reference.
+- Update the Reference Router when a reference is added, removed, renamed, or changes responsibility.
+- Keep module descriptions concise and focused on ownership, boundaries, and navigation.
+- Keep repository-native C++ server, protocol, E2E, and benchmark verification in `references/cpp-server.md`. Keep verification scripts bundled with a parent skill in that owning skill; do not duplicate them here.
+- Keep Oryx source navigation and Oryx-native verification in `references/oryx.md`; do not mix it into the standalone SRS maps.

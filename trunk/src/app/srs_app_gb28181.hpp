@@ -1,449 +1,628 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Lixin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_GB28181_HPP
 #define SRS_APP_GB28181_HPP
 
 #include <srs_core.hpp>
 
-#include <arpa/inet.h>
-#include <string>
-#include <vector>
-#include <queue>
-#include <map>
-
-#include <srs_app_st.hpp>
-#include <srs_app_thread.hpp>
 #include <srs_app_listener.hpp>
-#include <srs_rtsp_stack.hpp>
-#include <srs_kernel_stream.hpp>
-#include <srs_app_log.hpp>
-#include <srs_kernel_file.hpp>
-#include <srs_protocol_json.hpp>
-#include <srs_app_gb28181_sip.hpp>
+#include <srs_app_st.hpp>
+#include <srs_kernel_ps.hpp>
+#include <srs_protocol_conn.hpp>
+#include <srs_protocol_http_conn.hpp>
 
-#define RTP_PORT_MODE_FIXED "fixed"
-#define RTP_PORT_MODE_RANDOM "random"
+#include <sstream>
 
 class SrsConfDirective;
-class SrsRtpPacket;
-class SrsRtmpClient;
-class SrsRawH264Stream;
-class SrsRawAacStream;
-struct SrsRawAacStreamCodec;
-class SrsSharedPtrMessage;
-class SrsAudioFrame;
-class SrsSimpleStream;
-class SrsPithyPrint;
+class SrsTcpListener;
+class SrsResourceManager;
+class SrsTcpConnection;
+class ISrsCoroutine;
+class SrsPackContext;
+class SrsBuffer;
+class SrsGbSession;
+class SrsGbMediaTcpConn;
+class SrsAlonePithyPrint;
+class SrsGbMuxer;
 class SrsSimpleRtmpClient;
-class SrsSipStack;
-class SrsGb28181Manger;
-class SrsRtspJitter;
-class SrsSipRequest;
-class SrsGb28181RtmpMuxer;
-class SrsGb28181Config;
-class SrsGb28181PsRtpProcessor;
-class SrsGb28181SipService;
-class SrsGb28181StreamChannel;
-class SrsGb28181SipSession;
+struct SrsRawAacStreamCodec;
+class SrsRawH264Stream;
+class SrsRawHEVCStream;
+class SrsMediaPacket;
+class SrsPithyPrint;
+class SrsRawAacStream;
+class ISrsCommonHttpHandler;
+class ISrsGbMuxer;
+class ISrsGbSession;
+class ISrsPackContext;
+class ISrsMpegpsQueue;
+class ISrsPsContext;
+class ISrsListener;
+class ISrsProtocolReadWriter;
+class ISrsRawH264Stream;
+class ISrsRawHEVCStream;
+class ISrsRawAacStream;
+class ISrsPithyPrint;
+class ISrsBasicRtmpClient;
+class SrsTsMessage;
+class SrsPsPacket;
+class ISrsGbSession;
+class ISrsGbMediaTcpConn;
+class ISrsAppConfig;
+class ISrsApiServerOwner;
+class ISrsResourceManager;
+class ISrsAppFactory;
+class ISrsIpListener;
 
-//ps rtp header packet parse
-class SrsPsRtpPacket: public SrsRtpPacket
+// The state machine for GB session.
+// init:
+//      to connecting: sip is registered. Note that also send invite request if media not connected.
+// connecting:
+//      to established: sip is stable, media is connected.
+// established:
+//      init: media is not connected.
+//      dispose session: sip is bye.
+// Please see SrsGbSession::drive_state for detail.
+enum SrsGbSessionState {
+    SrsGbSessionStateInit = 0,
+    SrsGbSessionStateConnecting,
+    SrsGbSessionStateEstablished,
+};
+std::string srs_gb_session_state(SrsGbSessionState state);
+std::string srs_gb_state(SrsGbSessionState ostate, SrsGbSessionState state);
+
+// For external SIP server mode, where SRS acts only as a media relay server
+//     1. SIP server POST request via HTTP API with stream ID and SSRC
+//     2. SRS create session using ID and SSRC, return a port for receiving media streams (indicated in conf).
+//     3. External streaming service connect to the port, and send RTP stream (with the above SSRC)
+//     4. SRS forward the stream to RTMP stream, named after ID
+//
+// Request:
+//      POST /gb/v1/publish/
+//      {
+//              "id": "...",
+//              "ssrc": "..."
+//      }
+// Response:
+//      {"port":9000, "is_tcp": true}
+class SrsGoApiGbPublish : public ISrsHttpHandler
 {
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsResourceManager *gb_manager_;
+    ISrsAppFactory *app_factory_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsConfDirective *conf_;
+
 public:
-    SrsPsRtpPacket();
-    virtual ~SrsPsRtpPacket();
+    SrsGoApiGbPublish(SrsConfDirective *conf);
+    virtual ~SrsGoApiGbPublish();
+
 public:
-    virtual srs_error_t decode(SrsBuffer* stream);
+    virtual srs_error_t serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t do_serve_http(ISrsHttpResponseWriter *w, ISrsHttpMessage *r, SrsJsonObject *res);
+    srs_error_t bind_session(std::string stream, uint64_t ssrc);
 };
 
-//randomly assigned ports receive gb28181 device streams
-class SrsPsRtpListener: public ISrsUdpHandler
+// The interface for GB session.
+class ISrsGbSession : public ISrsResource, public ISrsCoroutineHandler, public ISrsExecutorHandler
 {
-private:
-    SrsUdpListener* listener;
-    SrsGb28181PsRtpProcessor* rtp_processor;
-    int _port;
 public:
-    SrsPsRtpListener(SrsGb28181Config* c, int p, std::string s);
-    virtual ~SrsPsRtpListener();
+    // The device ID generated and set by external SIP server, using SRS HTTP API. This
+    // device ID is used to generate the RTMP stream name.
+    std::string device_id_;
+
 public:
-    virtual int port();
-    virtual srs_error_t listen();
-// Interface ISrsUdpHandler
+    ISrsGbSession();
+    virtual ~ISrsGbSession();
+
 public:
-    virtual srs_error_t on_udp_packet(const sockaddr* from, const int fromlen, char* buf, int nb_buf);
+    // Initialize the GB session.
+    virtual void setup(SrsConfDirective *conf) = 0;
+    // Setup the owner, the wrapper is the shared ptr, the interruptable object is the coroutine, and the cid is the context id.
+    virtual void setup_owner(SrsSharedResource<ISrsGbSession> *wrapper, ISrsInterruptable *owner_coroutine, ISrsContextIdSetter *owner_cid) = 0;
+    // Notice session to use current media connection.
+    virtual void on_media_transport(SrsSharedResource<ISrsGbMediaTcpConn> media) = 0;
+    // Notice session that its current media connection is disconnected.
+    virtual void on_media_disconnected(ISrsGbMediaTcpConn *media) = 0;
+    // Whether the session's cycle ended, so it takes no media connection.
+    virtual bool is_ended() = 0;
+
+public:
+    virtual void on_ps_pack(ISrsPackContext *ctx, SrsPsPacket *ps, const std::vector<SrsTsMessage *> &msgs) = 0;
 };
 
-//multiplexing service, single port receiving all gb28181 device streams
-class SrsGb28181RtpMuxService : public ISrsUdpHandler
+// The main logic object for GB, the session.
+// Each session holds every media connection that bound it by shared ptr, and a media connection points
+// back at the session by a raw pointer. The session cuts those pointers by interrupt() when its cycle
+// ends and when it is freed, so a connection never points at a freed session.
+class SrsGbSession : public ISrsGbSession
 {
-private:
-   SrsGb28181Config *config;
-   SrsGb28181PsRtpProcessor *rtp_processor;
-public:
-    SrsGb28181RtpMuxService(SrsConfDirective* c);
-    virtual ~SrsGb28181RtpMuxService();
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsContext *context_;
 
-    // Interface ISrsUdpHandler
-public:
-    virtual srs_error_t on_udp_packet(const sockaddr* from, const int fromlen, char* buf, int nb_buf);
-};
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsContextId cid_;
 
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The shared resource which own this object, we should never free it because it's managed by shared ptr.
+    SrsSharedResource<ISrsGbSession> *wrapper_;
+    // The owner coroutine, allow user to interrupt the loop.
+    ISrsInterruptable *owner_coroutine_;
+    ISrsContextIdSetter *owner_cid_;
 
-//process gb28181 RTP package, generate a completed PS stream data, 
-//call the PS stream parser, parse the original video and audio
-class SrsGb28181PsRtpProcessor: public ISrsUdpHandler
-{
-private:
-    SrsPithyPrint* pprint;
-    SrsGb28181Config* config;
-    std::map<std::string, SrsPsRtpPacket*> cache_ps_rtp_packet;
-    std::map<std::string,  SrsPsRtpPacket*> pre_packet;
-    std::string channel_id;
-    bool auto_create_channel;
-public:
-    SrsGb28181PsRtpProcessor(SrsGb28181Config* c, std::string sid);
-    virtual ~SrsGb28181PsRtpProcessor();
-private:
-    bool can_send_ps_av_packet();
-    void dispose();
-    void clear_pre_packet();
-// Interface ISrsUdpHandler
-public:
-    virtual srs_error_t on_udp_packet(const sockaddr* from, const int fromlen, char* buf, int nb_buf);
-};
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsGbSessionState state_;
 
-//ps stream processing parsing interface
-class ISrsPsStreamHander
-{
-public:
-    ISrsPsStreamHander();
-    virtual ~ISrsPsStreamHander();
-public:
-    virtual srs_error_t on_rtp_video(SrsSimpleStream* stream, int64_t dts)=0;
-    virtual srs_error_t on_rtp_audio(SrsSimpleStream* stream, int64_t dts)=0;
-};
+    SrsSharedResource<ISrsGbMediaTcpConn> media_;
+    // The media connections that bound this session and still run, media_ among them; each points at
+    // this session until its interrupt().
+    std::vector<SrsSharedResource<ISrsGbMediaTcpConn> > medias_;
+    ISrsGbMuxer *muxer_;
+    // Whether the cycle ended, so no media connection binds the session or uses its muxer any more.
+    bool cycle_done_;
 
-//analysis of PS stream and 
-//extraction of H264 raw data and audio data
-//then process the flow through PS stream hander, 
-//such as RTMP multiplexer, and composited into RTMP av stream
-class SrsPsStreamDemixer
-{
-public:
-    // gb28181 program stream struct define
-    struct SrsPsPacketStartCode
-    {
-        uint8_t start_code[3];
-        uint8_t stream_id[1];
-    };
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // When wait for media connecting, timeout if exceed.
+    srs_utime_t connecting_starttime_;
+    // Timeout for an API-created session waiting for its media TCP connection.
+    srs_utime_t media_connect_timeout_;
+    // The time we enter reinviting state.
+    srs_utime_t reinviting_starttime_;
+    // The number of timeout, dispose session if exceed.
+    uint32_t nn_timeout_;
 
-    struct SrsPsPacketHeader
-    {
-        SrsPsPacketStartCode start;// 4
-        uint8_t info[9];
-        uint8_t stuffing_length;
-    };
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsAlonePithyPrint *ppp_;
+    srs_utime_t startime_;
+    uint64_t total_packs_;
+    uint64_t total_msgs_;
+    uint64_t total_recovered_;
+    uint64_t total_msgs_dropped_;
+    uint64_t total_reserved_;
 
-    struct SrsPsPacketBBHeader
-    {
-        SrsPsPacketStartCode start;
-        uint16_t    length;
-    };
-
-    struct SrsPsePacket
-    {
-        SrsPsPacketStartCode     start;
-        uint16_t    length;
-        uint8_t         info[2];
-        uint8_t         stuffing_length;
-    };
-
-    struct SrsPsMapPacket
-    {
-        SrsPsPacketStartCode  start;
-        uint16_t length;
-    };
-
-private:
-    SrsFileWriter ps_fw;
-    SrsFileWriter video_fw;
-    SrsFileWriter audio_fw;
-    SrsFileWriter unknow_fw;
-
-    bool first_keyframe_flag;
-    bool wait_first_keyframe;
-    bool audio_enable;
-    std::string channel_id;
-
-    ISrsPsStreamHander *hander;
-public:
-    SrsPsStreamDemixer(ISrsPsStreamHander *h, std::string sid, bool a, bool k);
-    virtual ~SrsPsStreamDemixer();
-private:
-    bool can_send_ps_av_packet();
-public:
-    int64_t parse_ps_timestamp(const uint8_t* p);
-    virtual srs_error_t on_ps_stream(char* ps_data, int ps_size, uint32_t timestamp, uint32_t ssrc);
-};
-
-
-//RTMP multiplexer, which processes the raw H264 / AAC, 
-//then publish it to RTMP server
-class SrsGb28181RtmpMuxer : public ISrsCoroutineHandler, 
-     public ISrsConnection, public ISrsPsStreamHander
-{
-private:
-    SrsPithyPrint* pprint;
-    SrsGb28181StreamChannel *channel;
-    int stream_idle_timeout;
-    srs_utime_t recv_rtp_stream_time;
-    srs_utime_t send_rtmp_stream_time;
-private:
-    std::string channel_id;
-    std::string _rtmp_url;
-    std::string video_ssrc;
-    std::string audio_ssrc;
-
-    SrsGb28181Manger* gb28181_manger;
-    SrsCoroutine* trd;
-    SrsPsStreamDemixer* ps_demixer;
-    srs_cond_t wait_ps_queue;
-
-    SrsSimpleRtmpClient* sdk;
-    SrsRtspJitter* vjitter;
-    SrsRtspJitter* ajitter;
-
-    SrsRawH264Stream* avc;
-    std::string h264_sps;
-    std::string h264_pps;
-
-    SrsRawAacStream* aac;
-    std::string aac_specific_config;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    uint32_t media_id_;
+    srs_utime_t media_starttime_;
+    uint64_t media_msgs_;
+    uint64_t media_packs_;
+    uint64_t media_recovered_;
+    uint64_t media_msgs_dropped_;
+    uint64_t media_reserved_;
 
 public:
-    std::queue<SrsPsRtpPacket*> ps_queue;
+    SrsGbSession();
+    void assemble(); // Construct object, to avoid call function in constructor.
+    virtual ~SrsGbSession();
 
 public:
-    SrsGb28181RtmpMuxer(SrsGb28181Manger* m, std::string id, bool a, bool k);
-    virtual ~SrsGb28181RtmpMuxer();
+    // Initialize the GB session.
+    void setup(SrsConfDirective *conf);
+    // Setup the owner, the wrapper is the shared ptr, the interruptable object is the coroutine, and the cid is the context id.
+    void setup_owner(SrsSharedResource<ISrsGbSession> *wrapper, ISrsInterruptable *owner_coroutine, ISrsContextIdSetter *owner_cid);
+    // Interface ISrsExecutorHandler
+public:
+    virtual void on_executor_done(ISrsInterruptable *executor);
 
 public:
-    virtual srs_error_t serve();
-    virtual void stop();
-   
-    virtual std::string get_channel_id();
-    virtual void ps_packet_enqueue(SrsPsRtpPacket *pkt);
-    virtual void copy_channel(SrsGb28181StreamChannel *s);
-    virtual void set_channel_peer_ip(std::string ip);
-    virtual void set_channel_peer_port(int port);
-    virtual int channel_peer_port();
-    virtual std::string channel_peer_ip();
-    virtual void set_rtmp_url(std::string url);
-    virtual std::string rtmp_url();
-    virtual SrsGb28181StreamChannel get_channel();
-    srs_utime_t get_recv_stream_time();
+    // When got a pack of messages.
+    void on_ps_pack(ISrsPackContext *ctx, SrsPsPacket *ps, const std::vector<SrsTsMessage *> &msgs);
 
-private:
-    virtual srs_error_t do_cycle();
-    virtual void destroy();
+    // When got available media transport.
+    void on_media_transport(SrsSharedResource<ISrsGbMediaTcpConn> media);
+    // When current media transport is disconnected.
+    void on_media_disconnected(ISrsGbMediaTcpConn *media);
+    // Whether the session's cycle ended, so it takes no media connection.
+    bool is_ended();
 
-// Interface ISrsOneCycleThreadHandler
+    // Interface ISrsCoroutineHandler
 public:
     virtual srs_error_t cycle();
-    virtual std::string remote_ip();
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t do_cycle();
+    srs_error_t drive_state();
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsGbSessionState set_state(SrsGbSessionState v);
+    // Interface ISrsResource
 public:
-    virtual srs_error_t on_rtp_video(SrsSimpleStream* stream, int64_t dts);
-    virtual srs_error_t on_rtp_audio(SrsSimpleStream* stream, int64_t dts);
-private:
+    virtual const SrsContextId &get_id();
+    virtual std::string desc();
+};
+
+// The listener for GB.
+class ISrsGbListener : public ISrsListener
+{
+public:
+    ISrsGbListener();
+    virtual ~ISrsGbListener();
+
+public:
+    virtual srs_error_t initialize(SrsConfDirective *conf) = 0;
+    virtual void close() = 0;
+};
+
+// The Media listener for GB.
+class SrsGbListener : public ISrsGbListener, public ISrsTcpHandler
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsApiServerOwner *api_server_owner_;
+    ISrsResourceManager *gb_manager_;
+    ISrsAppFactory *app_factory_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    SrsConfDirective *conf_;
+    ISrsIpListener *media_listener_;
+
+public:
+    SrsGbListener(ISrsApiServerOwner *owner);
+    virtual ~SrsGbListener();
+
+public:
+    virtual srs_error_t initialize(SrsConfDirective *conf);
+    virtual srs_error_t listen();
+    virtual void close();
+    // Interface ISrsTcpHandler
+public:
+    virtual srs_error_t on_tcp_client(ISrsListener *listener, srs_netfd_t stfd);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    srs_error_t listen_api();
+};
+
+// The handler for a pack of PS PES packets.
+class ISrsPsPackHandler
+{
+public:
+    ISrsPsPackHandler();
+    virtual ~ISrsPsPackHandler();
+
+public:
+    // When got a pack of PS/TS messages, contains one video frame and optional SPS/PPS message, one or generally more
+    // audio frames. Note that the ps contains the pack information.
+    virtual srs_error_t on_ps_pack(SrsPsPacket *ps, const std::vector<SrsTsMessage *> &msgs) = 0;
+};
+
+// The interface for GB media transport.
+class ISrsGbMediaTcpConn : public ISrsResource, public ISrsCoroutineHandler, public ISrsExecutorHandler
+{
+public:
+    ISrsGbMediaTcpConn();
+    virtual ~ISrsGbMediaTcpConn();
+
+public:
+    virtual void assemble() = 0;
+    // Setup object, to keep empty constructor.
+    virtual void setup(srs_netfd_t stfd) = 0;
+    // Setup the owner, the wrapper is the shared ptr, the interruptable object is the coroutine, and the cid is the context id.
+    virtual void setup_owner(SrsSharedResource<ISrsGbMediaTcpConn> *wrapper, ISrsInterruptable *owner_coroutine, ISrsContextIdSetter *owner_cid) = 0;
+    // Whether media is connected.
+    virtual bool is_connected() = 0;
+    // Interrupt transport by session.
+    virtual void interrupt() = 0;
+    // Set the cid of all coroutines.
+    virtual void set_cid(const SrsContextId &cid) = 0;
+};
+
+// A GB28181 TCP media connection, for PS stream.
+class SrsGbMediaTcpConn : public ISrsGbMediaTcpConn, // It's a resource, coroutine handler, and executor handler.
+                          public ISrsPsPackHandler
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsResourceManager *gb_manager_;
+    ISrsContext *context_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    bool connected_;
+    // The session this connection bound. The session sets it to NULL by interrupt() when its cycle ends
+    // or it is freed, so it never points at a freed session.
+    ISrsGbSession *session_;
+    uint32_t nn_rtcp_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The shared resource which own this object, we should never free it because it's managed by shared ptr.
+    SrsSharedResource<ISrsGbMediaTcpConn> *wrapper_;
+    // The owner coroutine, allow user to interrupt the loop.
+    ISrsInterruptable *owner_coroutine_;
+    ISrsContextIdSetter *owner_cid_;
+    SrsContextId cid_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsPackContext *pack_;
+    ISrsProtocolReadWriter *conn_;
+    uint8_t *buffer_;
+
+public:
+    SrsGbMediaTcpConn();
+    virtual void assemble(); // Construct object, to avoid call function in constructor.
+    virtual ~SrsGbMediaTcpConn();
+
+public:
+    // Setup object, to keep empty constructor.
+    void setup(srs_netfd_t stfd);
+    // Setup the owner, the wrapper is the shared ptr, the interruptable object is the coroutine, and the cid is the context id.
+    void setup_owner(SrsSharedResource<ISrsGbMediaTcpConn> *wrapper, ISrsInterruptable *owner_coroutine, ISrsContextIdSetter *owner_cid);
+    // Interface ISrsExecutorHandler
+public:
+    virtual void on_executor_done(ISrsInterruptable *executor);
+
+public:
+    // Whether media is connected.
+    bool is_connected();
+    // Interrupt transport by session.
+    void interrupt();
+    // Set the cid of all coroutines.
+    virtual void set_cid(const SrsContextId &cid);
+    // Interface ISrsResource
+public:
+    virtual const SrsContextId &get_id();
+    virtual std::string desc();
+    // Interface ISrsCoroutineHandler
+public:
+    virtual srs_error_t cycle();
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t do_cycle();
+    // Interface ISrsPsPackHandler
+public:
+    virtual srs_error_t on_ps_pack(SrsPsPacket *ps, const std::vector<SrsTsMessage *> &msgs);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // Create session if no one, or bind to an existed session.
+    srs_error_t bind_session(uint32_t ssrc, ISrsGbSession **psession);
+};
+
+// The interface for mpegps queue.
+class ISrsMpegpsQueue
+{
+public:
+    ISrsMpegpsQueue();
+    virtual ~ISrsMpegpsQueue();
+
+public:
+    virtual srs_error_t push(SrsMediaPacket *msg) = 0;
+    virtual SrsMediaPacket *dequeue() = 0;
+};
+
+// The queue for mpegts over udp to send packets.
+// For the aac in mpegts contains many flv packets in a pes packet,
+// we must recalc the timestamp.
+class SrsMpegpsQueue : public ISrsMpegpsQueue
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The key: dts, value: msg.
+    std::map<int64_t, SrsMediaPacket *>
+        msgs_;
+    int nb_audios_;
+    int nb_videos_;
+    // Whether a message of the track has come. The queue waits only for a
+    // track that has come, so a stream with no audio, as a device with its
+    // audio off sends it, or with no video, is held by one message too.
+    bool has_audio_;
+    bool has_video_;
+
+public:
+    SrsMpegpsQueue();
+    virtual ~SrsMpegpsQueue();
+
+public:
+    virtual srs_error_t push(SrsMediaPacket *msg);
+    virtual SrsMediaPacket *dequeue();
+};
+
+// The interface for GB muxer.
+class ISrsGbMuxer
+{
+public:
+    ISrsGbMuxer();
+    virtual ~ISrsGbMuxer();
+
+public:
+    virtual void assemble() = 0; // Construct object, to avoid call function in constructor.
+    virtual void setup(std::string output) = 0;
+    virtual srs_error_t on_ts_message(SrsTsMessage *msg) = 0;
+};
+
+// Mux GB28181 to RTMP.
+class SrsGbMuxer : public ISrsGbMuxer
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppFactory *app_factory_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // The owner session object, note that we use the raw pointer and should never free it.
+    ISrsGbSession *session_;
+    std::string output_;
+    // The RTMP client, set only once it has connected and published.
+    ISrsBasicRtmpClient *sdk_;
+    // Whether a coroutine is connecting the RTMP client.
+    bool connecting_;
+    // Whether a coroutine is sending the queued messages through the RTMP client, which yields. Only
+    // that coroutine sends and closes the client, and another one only queues its messages.
+    bool sending_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsRawH264Stream *avc_;
+    std::string h264_sps_;
+    bool h264_sps_changed_;
+    std::string h264_pps_;
+    bool h264_pps_changed_;
+    bool h264_sps_pps_sent_;
+
+    ISrsRawHEVCStream *hevc_;
+    bool vps_sps_pps_change_;
+    std::string h265_vps_;
+    std::string h265_sps_;
+    std::string h265_pps_;
+    bool vps_sps_pps_sent_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsRawAacStream *aac_;
+    std::string aac_specific_config_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsMpegpsQueue *queue_;
+    ISrsPithyPrint *pprint_;
+
+public:
+    SrsGbMuxer(ISrsGbSession *session);
+    virtual ~SrsGbMuxer();
+
+public:
+    void assemble(); // Construct object, to avoid call function in constructor.
+    void setup(std::string output);
+    srs_error_t on_ts_message(SrsTsMessage *msg);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual srs_error_t on_ts_video(SrsTsMessage *msg, SrsBuffer *avs);
+    virtual srs_error_t mux_h264(SrsTsMessage *msg, SrsBuffer *avs);
     virtual srs_error_t write_h264_sps_pps(uint32_t dts, uint32_t pts);
-    virtual srs_error_t write_h264_ipb_frame(char* frame, int frame_size, uint32_t dts, uint32_t pts);
-    virtual srs_error_t write_audio_raw_frame(char* frame, int frame_size, SrsRawAacStreamCodec* codec, uint32_t dts);
-    virtual srs_error_t rtmp_write_packet(char type, uint32_t timestamp, char* data, int size);
-private:
+    virtual srs_error_t write_h264_ipb_frame(const std::string &ibps, bool keyframe, uint32_t dts, uint32_t pts);
+    virtual srs_error_t mux_h265(SrsTsMessage *msg, SrsBuffer *avs);
+    virtual srs_error_t write_h265_vps_sps_pps(uint32_t dts, uint32_t pts);
+    virtual srs_error_t write_h265_ipb_frame(const std::string &ipbs, bool keyframe, uint32_t dts, uint32_t pts);
+    virtual srs_error_t on_ts_audio(SrsTsMessage *msg, SrsBuffer *avs);
+    virtual srs_error_t write_audio_raw_frame(char *frame, int frame_size, SrsRawAacStreamCodec *codec, uint32_t dts);
+    virtual srs_error_t rtmp_write_packet(char type, uint32_t timestamp, char *data, int size);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // Send the queued messages through the RTMP client, and close it on a failure.
+    virtual srs_error_t send_queued_messages();
     // Connect to RTMP server.
     virtual srs_error_t connect();
     // Close the connection to RTMP server.
     virtual void close();
-public:
-    virtual void rtmp_close();
 };
 
-//system parameter configuration of gb28181 module,
-//read file from configuration file to generate
-class SrsGb28181Config
+// The interface for recoverable PS context.
+class ISrsRecoverablePsContext
 {
 public:
-    std::string host;
-    srs_utime_t rtp_idle_timeout;
-    bool audio_enable;
-    bool wait_keyframe;
-    std::string output;
-    int rtp_port_min;
-    int rtp_port_max;
-    int rtp_mux_port;
-    bool auto_create_channel;
+    ISrsRecoverablePsContext();
+    virtual ~ISrsRecoverablePsContext();
 
-    //sip config
-    int  sip_port;
-    std::string sip_serial;
-    std::string sip_realm;
-    bool sip_enable;
-    srs_utime_t sip_ack_timeout;
-    srs_utime_t sip_keepalive_timeout;
-    bool sip_auto_play;
-    bool sip_invite_port_fixed;
-    srs_utime_t sip_query_catalog_interval;
- 
 public:
-    SrsGb28181Config(SrsConfDirective* c);
-    virtual ~SrsGb28181Config();
 };
 
-class SrsGb28181StreamChannel
+// Recoverable PS context for GB28181.
+class SrsRecoverablePsContext : public ISrsRecoverablePsContext
 {
-private:
-    std::string channel_id;
-    std::string port_mode;
-    std::string app;
-    std::string stream;
-    std::string rtmp_url;
-    
-    std::string ip;
-    int rtp_port;
-    int rtmp_port;
-    uint32_t ssrc;
-    srs_utime_t recv_time;
-    std::string recv_time_str;
-    
-    //send rtp stream client local port
-    int rtp_peer_port;
-    //send rtp stream client local ip
-    std::string rtp_peer_ip;
+public:
+    ISrsPsContext *ctx_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // If decoding error, enter the recover mode. Drop all left bytes util next pack header.
+    int recover_;
 
 public:
-    SrsGb28181StreamChannel();
-    virtual ~SrsGb28181StreamChannel();
+    SrsRecoverablePsContext();
+    virtual ~SrsRecoverablePsContext();
 
-    std::string get_channel_id() const { return channel_id; }
-    std::string get_port_mode() const { return port_mode; }
-    std::string get_app() const { return app; }
-    std::string get_stream() const { return stream; }
-    std::string get_ip() const { return ip; }
-    int get_rtp_port() const { return rtp_port; }
-    int get_rtmp_port() const { return rtmp_port; }
-    uint32_t get_ssrc() const { return ssrc; }
-    uint32_t get_rtp_peer_port() const { return rtp_peer_port; }
-    std::string get_rtp_peer_ip() const { return rtp_peer_ip; }
-    std::string get_rtmp_url() const { return rtmp_url; }
-    srs_utime_t get_recv_time() const { return recv_time; }
-    std::string get_recv_time_str() const { return recv_time_str; }
+public:
+    // Decode the PS stream in RTP payload. Note that there might be first reserved bytes of RAW data, which is not
+    // parsed by previous decoding, we should move to the start of payload bytes.
+    virtual srs_error_t decode_rtp(SrsBuffer *stream, int reserved, ISrsPsMessageHandler *handler);
 
-    void set_channel_id(const std::string &i) { channel_id = i; }
-    void set_port_mode(const std::string &p) { port_mode = p; }
-    void set_app(const std::string &a) { app = a; }
-    void set_stream(const std::string &s) { stream = s; }
-    void set_ip(const std::string &i) { ip = i; }
-    void set_rtp_port( const int &p) { rtp_port = p; }
-    void set_rtmp_port( const int &p) { rtmp_port = p; }
-    void set_ssrc( const int &s) { ssrc = s;}
-    void set_rtp_peer_ip( const std::string &p) { rtp_peer_ip = p; }
-    void set_rtp_peer_port( const int &s) { rtp_peer_port = s;}
-    void set_rtmp_url( const std::string &u) { rtmp_url = u; }
-    void set_recv_time( const srs_utime_t &u) { recv_time = u; }
-    void set_recv_time_str( const std::string &u) { recv_time_str = u; }
-
-    void copy(const SrsGb28181StreamChannel *s);
-    void dumps(SrsJsonObject* obj);
-
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // Decode the RTP payload as PS pack stream.
+    virtual srs_error_t decode(SrsBuffer *stream, ISrsPsMessageHandler *handler);
+    // When got error, drop data and enter recover mode.
+    srs_error_t enter_recover_mode(SrsBuffer *stream, ISrsPsMessageHandler *handler, int pos, srs_error_t err);
+    // Quit Recover mode when got pack header.
+    void quit_recover_mode(SrsBuffer *stream, ISrsPsMessageHandler *handler);
 };
 
-// Global singleton instance.
-extern SrsGb28181Manger* _srs_gb28181;
-
-//gb28181 module management, management of all RTMP multiplexers,
-//random assignment of RTP listeners, and external control interfaces
-class SrsGb28181Manger
+// The interface for PS pack context.
+class ISrsPackContext : public ISrsPsMessageHandler
 {
-private:
-    SrsGb28181Config *config;
-    // The key: port, value: whether used.
-    std::map<int, bool> used_ports;
-    std::map<uint32_t, SrsPsRtpListener*> rtp_pool;
-    std::map<uint32_t, SrsGb28181RtmpMuxer*> rtmpmuxers_ssrc;
-    std::map<std::string, SrsGb28181RtmpMuxer*> rtmpmuxers;
-    SrsCoroutineManager* manager;
-    SrsGb28181SipService* sip_service;
 public:
-    SrsGb28181Manger(SrsConfDirective* c);
-    virtual ~SrsGb28181Manger();
+    // Each media transport only use one context, so the context id is the media id.
+    uint32_t media_id_;
+    srs_utime_t media_startime_;
+    uint64_t media_nn_recovered_;
+    uint64_t media_nn_msgs_dropped_;
+    uint64_t media_reserved_;
 
 public:
-    srs_error_t fetch_or_create_rtmpmuxer(std::string id, SrsGb28181RtmpMuxer** gb28181);
-    SrsGb28181RtmpMuxer* fetch_rtmpmuxer(std::string id);
-    SrsGb28181RtmpMuxer* fetch_rtmpmuxer_by_ssrc(uint32_t ssrc);
-    void rtmpmuxer_map_by_ssrc(SrsGb28181RtmpMuxer*muxer, uint32_t ssrc);
-    void rtmpmuxer_unmap_by_ssrc(uint32_t ssrc);
-    uint32_t generate_ssrc(std::string id);
-    uint32_t hash_code(std::string str);
-
-    void set_sip_service(SrsGb28181SipService *s) { sip_service = s; }
-    SrsGb28181SipService* get_sip_service() { return sip_service; }
-
-public:
-    //stream channel api
-    srs_error_t create_stream_channel(SrsGb28181StreamChannel *channel);
-    srs_error_t delete_stream_channel(std::string id);
-    srs_error_t query_stream_channel(std::string id, SrsJsonArray* arr);
-    //sip api
-    srs_error_t notify_sip_invite(std::string id, std::string ip, int port, uint32_t ssrc, std::string chid);
-    srs_error_t notify_sip_bye(std::string id, std::string chid);
-    srs_error_t notify_sip_raw_data(std::string id, std::string data);
-    srs_error_t notify_sip_unregister(std::string id);
-    srs_error_t notify_sip_query_catalog(std::string id);
-    srs_error_t notify_sip_ptz(std::string id, std::string chid, std::string cmd, uint8_t speed, int priority);
-    srs_error_t query_sip_session(std::string id, SrsJsonArray* arr);
-
-private:
-    void destroy();
-
-public:
-    // Alloc a rtp port from local ports pool.
-    // @param pport output the rtp port.
-    void alloc_port(int* pport);
-    // Free the alloced rtp port.
-    void free_port(int lpmin, int lpmax);
-    srs_error_t initialize();
-
-    SrsGb28181Config get_gb28181_config();
-    srs_error_t start_ps_rtp_listen(std::string id, int port);
-    void stop_rtp_listen(std::string id);
-
-public:
-    void remove(SrsGb28181RtmpMuxer* conn);
-    void remove_sip_session(SrsGb28181SipSession* sess);
+    ISrsPackContext();
+    virtual ~ISrsPackContext();
 };
+
+// The PS pack context, for GB28181 to process based on PS pack, which contains a video and audios messages. For large
+// video frame, it might be split to multiple PES packets, which must be group to one video frame.
+// Please note that a pack might contain multiple audio frames, so size of audio PES packet should not exceed 64KB,
+// which is limited by the 16 bits PES_packet_length.
+// We also correct the timestamp, or DTS/PTS of video frames, which might be 0 if more than one video PES packets in a
+// PS pack stream.
+class SrsPackContext : public ISrsPackContext
+{
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    // To process a pack of TS/PS messages.
+    ISrsPsPackHandler *handler_;
+    // Note that it might be freed, so never use its fields.
+    SrsPsPacket *ps_;
+    // The messages in current PS pack.
+    std::vector<SrsTsMessage *> msgs_;
+
+public:
+    SrsPackContext(ISrsPsPackHandler *handler);
+    virtual ~SrsPackContext();
+
+public:
+    void clear();
+
+    // Interface ISrsPsMessageHandler
+public:
+    virtual srs_error_t on_ts_message(SrsTsMessage *msg);
+    virtual void on_recover_mode(int nn_recover);
+};
+
+// Find the pack header which starts with bytes (00 00 01 ba).
+extern bool srs_skip_util_pack(SrsBuffer *stream);
+
+// Manager for GB connections.
+extern SrsResourceManager *_srs_gb_manager;
 
 #endif
-

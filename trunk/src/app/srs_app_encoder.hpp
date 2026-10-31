@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_ENCODER_HPP
 #define SRS_APP_ENCODER_HPP
@@ -29,42 +12,79 @@
 #include <string>
 #include <vector>
 
-#include <srs_app_thread.hpp>
+#include <srs_app_st.hpp>
 
 class SrsConfDirective;
-class SrsRequest;
+class ISrsRequest;
 class SrsPithyPrint;
+class ISrsPithyPrint;
 class SrsFFMPEG;
+class ISrsFFMPEG;
+class ISrsAppConfig;
+class ISrsAppFactory;
+
+// The encoder interface.
+class ISrsMediaEncoder
+{
+public:
+    ISrsMediaEncoder();
+    virtual ~ISrsMediaEncoder();
+
+public:
+    virtual void assemble() = 0;
+    virtual srs_error_t on_publish(ISrsRequest *req) = 0;
+    virtual void on_unpublish() = 0;
+    // Interface ISrsReusableThreadHandler.
+public:
+    virtual srs_error_t cycle() = 0;
+};
 
 // The encoder for a stream, may use multiple
 // ffmpegs to transcode the specified stream.
-class SrsEncoder : public ISrsCoroutineHandler
+class SrsEncoder : public ISrsCoroutineHandler, public ISrsMediaEncoder
 {
-private:
-    std::string input_stream_name;
-    std::vector<SrsFFMPEG*> ffmpegs;
-private:
-    SrsCoroutine* trd;
-    SrsPithyPrint* pprint;
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsAppFactory *app_factory_;
+    // The outputs of every encoder, shared by all of them to detect a loop: an input that is one
+    // of them is a stream transcoded already.
+    std::vector<std::string> *transcoded_urls_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    std::string input_stream_name_;
+    std::vector<ISrsFFMPEG *> ffmpegs_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsCoroutine *trd_;
+    ISrsPithyPrint *pprint_;
+
 public:
     SrsEncoder();
+    void assemble(); // Construct object, to avoid call function in constructor.
     virtual ~SrsEncoder();
+
 public:
-    virtual srs_error_t on_publish(SrsRequest* req);
+    virtual srs_error_t on_publish(ISrsRequest *req);
     virtual void on_unpublish();
-// Interface ISrsReusableThreadHandler.
+    // Interface ISrsReusableThreadHandler.
 public:
     virtual srs_error_t cycle();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual srs_error_t do_cycle();
-private:
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     virtual void clear_engines();
-    virtual SrsFFMPEG* at(int index);
-    virtual srs_error_t parse_scope_engines(SrsRequest* req);
-    virtual srs_error_t parse_ffmpeg(SrsRequest* req, SrsConfDirective* conf);
-    virtual srs_error_t initialize_ffmpeg(SrsFFMPEG* ffmpeg, SrsRequest* req, SrsConfDirective* engine);
+    virtual ISrsFFMPEG *at(int index);
+    virtual srs_error_t parse_scope_engines(ISrsRequest *req);
+    virtual srs_error_t parse_ffmpeg(ISrsRequest *req, SrsConfDirective *conf);
+    virtual srs_error_t initialize_ffmpeg(ISrsFFMPEG *ffmpeg, ISrsRequest *req, SrsConfDirective *engine);
     virtual void show_encode_log_message();
 };
 
 #endif
-

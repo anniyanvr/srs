@@ -1,50 +1,34 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_UTILITY_HPP
 #define SRS_APP_UTILITY_HPP
 
 #include <srs_core.hpp>
 
-#include <vector>
-#include <string>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include <limits.h>
-#include <arpa/inet.h>
-#include <sys/resource.h>
 
 #include <srs_app_st.hpp>
 #include <srs_kernel_log.hpp>
-#include <srs_service_utility.hpp>
+#include <srs_kernel_utility.hpp>
+#include <srs_protocol_utility.hpp>
 
 class SrsKbps;
 class SrsBuffer;
 class SrsJsonObject;
+class ISrsAppConfig;
 
 // Convert level in string to log level in int.
 // @return the log level defined in SrsLogLevel.
 extern SrsLogLevel srs_get_log_level(std::string level);
+extern SrsLogLevel srs_get_log_level_v2(std::string level);
 
 // Build the path according to vhost/app/stream, where replace variables:
 //       [vhost], the vhost of stream.
@@ -52,6 +36,12 @@ extern SrsLogLevel srs_get_log_level(std::string level);
 //       [stream], the stream name of stream.
 // @return the replaced path.
 extern std::string srs_path_build_stream(std::string template_path, std::string vhost, std::string app, std::string stream);
+
+// Parse the app and stream from a path that srs_path_build_stream built from template_path, for
+// example, live/livestream/index.m3u8 from [app]/[stream]/index.m3u8. The [vhost] must be vhost.
+// The app may have dirs, the stream has none, and a repeated variable must have the same value.
+// @return whether the template has both [app] and [stream], and the path matches it.
+extern bool srs_path_parse_stream(std::string template_path, std::string vhost, std::string path, std::string &app, std::string &stream);
 
 // Build the path according to timestamp, where replace variables:
 //       [2006], replace this const to current year.
@@ -62,34 +52,49 @@ extern std::string srs_path_build_stream(std::string template_path, std::string 
 //       [05], repleace this const to current second.
 //       [999], repleace this const to current millisecond.
 //       [timestamp],replace this const to current UNIX timestamp in ms.
+// The config decides whether the time is UTC or local.
 // @return the replaced path.
-extern std::string srs_path_build_timestamp(std::string template_path);
+extern std::string srs_path_build_timestamp(ISrsAppConfig *config, std::string template_path);
 
-// Kill the pid by SIGINT, then wait to quit,
-// Kill the pid by SIGKILL again when exceed the timeout.
-// @param pid the pid to kill. ignore for -1. set to -1 when killed.
-// @return an int error code.
-extern srs_error_t srs_kill_forced(int& pid);
+// The app utility.
+class SrsAppUtility
+{
+public:
+    SrsAppUtility();
+    virtual ~SrsAppUtility();
 
-// Current process resouce usage.
+public:
+    // Kill the pid by SIGINT, then wait to quit,
+    // Kill the pid by SIGKILL again when exceed the timeout.
+    // @param pid the pid to kill. ignore for -1. set to -1 when killed.
+    // @return an int error code.
+    virtual srs_error_t kill(int &pid);
+};
+
+// Current process resource usage.
 // @see: man getrusage
 class SrsRusage
 {
 public:
     // Whether the data is ok.
-    bool ok;
+    bool ok_;
     // The time in ms when sample.
-    int64_t sample_time;
-    
+    int64_t sample_time_;
+
 public:
-    rusage r;
-    
+    rusage r_;
+
 public:
     SrsRusage();
+
+public:
+    // The peak resident set size in kilobytes. The ru_maxrss of getrusage is in
+    // kilobytes on Linux, but in bytes on macOS.
+    int64_t maxrss_kbyte();
 };
 
 // Get system rusage, use cache to avoid performance problem.
-extern SrsRusage* srs_get_system_rusage();
+extern SrsRusage *srs_get_system_rusage();
 // The daemon st-thread will update it.
 extern void srs_update_system_rusage();
 
@@ -99,62 +104,62 @@ class SrsProcSelfStat
 {
 public:
     // Whether the data is ok.
-    bool ok;
+    bool ok_;
     // The time in ms when sample.
-    int64_t sample_time;
+    int64_t sample_time_;
     // The percent of usage. 0.153 is 15.3%.
-    float percent;
-    
+    float percent_;
+
     // data of /proc/[pid]/stat
 public:
     // pid %d      The process ID.
-    int pid;
+    int pid_;
     // comm %s     The  filename  of  the  executable,  in parentheses. This is visible whether or not the executable is
     //             swapped out.
-    char comm[32];
+    char comm_[32];
     // state %c    One character from the string "RSDZTW" where R is running, S is sleeping in an interruptible  wait,  D
     //             is  waiting in uninterruptible disk sleep, Z is zombie, T is traced or stopped (on a signal), and W is
     //             paging.
-    unsigned char state;
+    unsigned char state_;
     // ppid %d     The PID of the parent.
-    int ppid;
+    int ppid_;
     // pgrp %d     The process group ID of the process.
-    int pgrp;
+    int pgrp_;
     // session %d  The session ID of the process.
-    int session;
+    int session_;
     // tty_nr %d   The controlling terminal of the process.  (The minor device number is contained in the combination  of
     //             bits 31 to 20 and 7 to 0; the major device number is in bits 15 t0 8.)
-    int tty_nr;
+    int tty_nr_;
     // tpgid %d    The ID of the foreground process group of the controlling terminal of the process.
-    int tpgid;
+    int tpgid_;
     // flags %u (%lu before Linux 2.6.22)
     //             The  kernel  flags  word  of  the process.  For bit meanings, see the PF_* defines in <linux/sched.h>.
     //             Details depend on the kernel version.
-    unsigned int flags;
+    unsigned int flags_;
     // minflt %lu  The number of minor faults the process has made which have not required loading  a  memory  page  from
     //             disk.
-    unsigned long minflt;
+    unsigned long minflt_;
     // cminflt %lu The number of minor faults that the process's waited-for children have made.
-    unsigned long cminflt;
+    unsigned long cminflt_;
     // majflt %lu  The number of major faults the process has made which have required loading a memory page from disk.
-    unsigned long majflt;
+    unsigned long majflt_;
     // cmajflt %lu The number of major faults that the process's waited-for children have made.
-    unsigned long cmajflt;
+    unsigned long cmajflt_;
     // utime %lu   Amount  of  time that this process has been scheduled in user mode, measured in clock ticks (divide by
     //             sysconf(_SC_CLK_TCK).  This includes guest time, guest_time (time spent running  a  virtual  CPU,  see
     //             below),  so  that  applications  that are not aware of the guest time field do not lose that time from
     //             their calculations.
-    unsigned long utime;
+    unsigned long utime_;
     // stime %lu   Amount of time that this process has been scheduled in kernel mode, measured in clock ticks (divide by
     //             sysconf(_SC_CLK_TCK).
-    unsigned long stime;
+    unsigned long stime_;
     // cutime %ld  Amount  of  time that this process's waited-for children have been scheduled in user mode, measured in
     //             clock ticks (divide  by  sysconf(_SC_CLK_TCK).   (See  also  times(2).)   This  includes  guest  time,
     //             cguest_time (time spent running a virtual CPU, see below).
-    long cutime;
+    long cutime_;
     // cstime %ld  Amount of time that this process's waited-for children have been scheduled in kernel mode, measured in
     //             clock ticks (divide by sysconf(_SC_CLK_TCK).
-    long cstime;
+    long cstime_;
     // priority %ld
     //          (Explanation for Linux 2.6) For processes running a real-time scheduling  policy  (policy  below;  see
     //          sched_setscheduler(2)),  this  is the negated scheduling priority, minus one; that is, a number in the
@@ -164,87 +169,87 @@ public:
     //          visible nice range of -20 to 19.
     //
     //          Before Linux 2.6, this was a scaled value based on the scheduler weighting given to this process.
-    long priority;
+    long priority_;
     // nice %ld    The nice value (see setpriority(2)), a value in the range 19 (low priority) to -20 (high priority).
-    long nice;
+    long nice_;
     // num_threads %ld
     //          Number  of threads in this process (since Linux 2.6).  Before kernel 2.6, this field was hard coded to
     //          0 as a placeholder for an earlier removed field.
-    long num_threads;
+    long num_threads_;
     // itrealvalue %ld
     //          The time in jiffies before the next SIGALRM is sent to the process due to an  interval  timer.   Since
     //          kernel 2.6.17, this field is no longer maintained, and is hard coded as 0.
-    long itrealvalue;
+    long itrealvalue_;
     // starttime %llu (was %lu before Linux 2.6)
     //          The time in jiffies the process started after system boot.
-    long long starttime;
+    long long starttime_;
     // vsize %lu   Virtual memory size in bytes.
-    unsigned long vsize;
+    unsigned long vsize_;
     // rss %ld     Resident Set Size: number of pages the process has in real memory.  This is just the pages which count
     //             towards text, data, or stack space.  This does not include pages which have not been demand-loaded in,
     //             or which are swapped out.
-    long rss;
+    long rss_;
     // rsslim %lu  Current  soft limit in bytes on the rss of the process; see the description of RLIMIT_RSS in getprior-
     //             ity(2).
-    unsigned long rsslim;
+    unsigned long rsslim_;
     // startcode %lu
     //             The address above which program text can run.
-    unsigned long startcode;
+    unsigned long startcode_;
     // endcode %lu The address below which program text can run.
-    unsigned long endcode;
+    unsigned long endcode_;
     // startstack %lu
     //             The address of the start (i.e., bottom) of the stack.
-    unsigned long startstack;
+    unsigned long startstack_;
     // kstkesp %lu The current value of ESP (stack pointer), as found in the kernel stack page for the process.
-    unsigned long kstkesp;
+    unsigned long kstkesp_;
     // kstkeip %lu The current EIP (instruction pointer).
-    unsigned long kstkeip;
+    unsigned long kstkeip_;
     // signal %lu  The bitmap of pending signals, displayed as a decimal number.  Obsolete, because it does  not  provide
     //             information on real-time signals; use /proc/[pid]/status instead.
-    unsigned long signal;
+    unsigned long signal_;
     // blocked %lu The  bitmap  of blocked signals, displayed as a decimal number.  Obsolete, because it does not provide
     //             information on real-time signals; use /proc/[pid]/status instead.
-    unsigned long blocked;
+    unsigned long blocked_;
     // sigignore %lu
     //             The bitmap of ignored signals, displayed as a decimal number.  Obsolete, because it does  not  provide
     //             information on real-time signals; use /proc/[pid]/status instead.
-    unsigned long sigignore;
+    unsigned long sigignore_;
     // sigcatch %lu
     //             The  bitmap  of  caught signals, displayed as a decimal number.  Obsolete, because it does not provide
     //             information on real-time signals; use /proc/[pid]/status instead.
-    unsigned long sigcatch;
+    unsigned long sigcatch_;
     // wchan %lu   This is the "channel" in which the process is waiting.  It is the address of a system call, and can be
     //             looked  up in a namelist if you need a textual name.  (If you have an up-to-date /etc/psdatabase, then
     //             try ps -l to see the WCHAN field in action.)
-    unsigned long wchan;
+    unsigned long wchan_;
     // nswap %lu   Number of pages swapped (not maintained).
-    unsigned long nswap;
+    unsigned long nswap_;
     // cnswap %lu  Cumulative nswap for child processes (not maintained).
-    unsigned long cnswap;
+    unsigned long cnswap_;
     // exit_signal %d (since Linux 2.1.22)
     //             Signal to be sent to parent when we die.
-    int exit_signal;
+    int exit_signal_;
     // processor %d (since Linux 2.2.8)
     //             CPU number last executed on.
-    int processor;
+    int processor_;
     // rt_priority %u (since Linux 2.5.19; was %lu before Linux 2.6.22)
     //             Real-time scheduling priority, a number in the range 1 to 99 for processes scheduled under a real-time
     //             policy, or 0, for non-real-time processes (see sched_setscheduler(2)).
-    unsigned int rt_priority;
+    unsigned int rt_priority_;
     // policy %u (since Linux 2.5.19; was %lu before Linux 2.6.22)
     //             Scheduling policy (see sched_setscheduler(2)).  Decode using the SCHED_* constants in linux/sched.h.
-    unsigned int policy;
+    unsigned int policy_;
     // delayacct_blkio_ticks %llu (since Linux 2.6.18)
     //             Aggregated block I/O delays, measured in clock ticks (centiseconds).
-    unsigned long long delayacct_blkio_ticks;
+    unsigned long long delayacct_blkio_ticks_;
     // guest_time %lu (since Linux 2.6.24)
     //             Guest time of the process (time spent running a virtual CPU for a guest operating system), measured in
     //             clock ticks (divide by sysconf(_SC_CLK_TCK).
-    unsigned long guest_time;
+    unsigned long guest_time_;
     // cguest_time %ld (since Linux 2.6.24)
     //             Guest time of the process's children, measured in clock ticks (divide by sysconf(_SC_CLK_TCK).
-    long cguest_time;
-    
+    long cguest_time_;
+
 public:
     SrsProcSelfStat();
 };
@@ -282,19 +287,19 @@ class SrsProcSystemStat
 {
 public:
     // Whether the data is ok.
-    bool ok;
+    bool ok_;
     // The time in ms when sample.
-    int64_t sample_time;
+    int64_t sample_time_;
     // The percent of usage. 0.153 is 15.3%.
     // The percent is in [0, 1], where 1 is 100%.
     // for multiple core cpu, max also is 100%.
-    float percent;
+    float percent_;
     // The total cpu time units
     // @remark, zero for the previous total() is zero.
     //          the usaged_cpu_delta = total_delta * percent
     //          previous cpu total = this->total() - total_delta
-    int64_t total_delta;
-    
+    int64_t total_delta_;
+
     // data of /proc/stat
 public:
     // The amount of time, measured in units  of  USER_HZ
@@ -302,46 +307,74 @@ public:
     // sysconf(_SC_CLK_TCK)  to  obtain  the  right value)
     //
     // The system spent in user mode,
-    unsigned long long user;
+    unsigned long long user_;
     // user mode with low priority (nice),
-    unsigned long long nice;
+    unsigned long long nice_;
     // system mode,
-    unsigned long long sys;
+    unsigned long long sys_;
     // and the idle task, respectively.
-    unsigned long long idle;
-    
+    unsigned long long idle_;
+
     // In  Linux 2.6 this line includes three additional columns:
     //
     // iowait - time waiting for I/O to complete (since 2.5.41);
-    unsigned long long iowait;
+    unsigned long long iowait_;
     // irq - time servicing interrupts (since 2.6.0-test4);
-    unsigned long long irq;
+    unsigned long long irq_;
     // softirq  -  time  servicing  softirqs  (since 2.6.0-test4).
-    unsigned long long softirq;
-    
+    unsigned long long softirq_;
+
     // Since  Linux 2.6.11, there is an eighth column,
     // steal - stolen time, which is the time spent in other oper-
     // ating systems when running in a virtualized environment
-    unsigned long long steal;
-    
+    unsigned long long steal_;
+
     // Since Linux 2.6.24, there is a ninth column,
     // guest, which is the time spent running a virtual CPU for guest
     // operating systems under the control of the Linux kernel.
-    unsigned long long guest;
-    
+    unsigned long long guest_;
+
 public:
     SrsProcSystemStat();
-    
+
     // Get total cpu units.
     int64_t total();
 };
 
+// The host interface.
+class ISrsHost
+{
+public:
+    ISrsHost();
+    virtual ~ISrsHost();
+
+public:
+    virtual SrsProcSelfStat *self_proc_stat() = 0;
+};
+
+// Get the host info.
+class SrsHost : public ISrsHost
+{
+public:
+    SrsHost();
+    virtual ~SrsHost();
+
+public:
+    virtual SrsProcSelfStat *self_proc_stat();
+};
+
 // Get system cpu stat, use cache to avoid performance problem.
-extern SrsProcSelfStat* srs_get_self_proc_stat();
+extern SrsProcSelfStat *srs_get_self_proc_stat();
 // Get system cpu stat, use cache to avoid performance problem.
-extern SrsProcSystemStat* srs_get_system_proc_stat();
-// The daemon st-thread will update it.
+extern SrsProcSystemStat *srs_get_system_proc_stat();
+// The daemon st-thread will update it. Without /proc, as on macOS, the stats stay not ok.
 extern void srs_update_proc_stat();
+// Read process self stat from /proc/self/stat (Linux only).
+// @return true on success, false on failure or without /proc, as on macOS.
+extern bool get_proc_self_stat(SrsProcSelfStat &r);
+// Parse a line of /proc/[pid]/stat into r, the comm without its parentheses.
+// @return true on success, false when the line has no comm in parentheses.
+extern bool srs_parse_proc_self_stat(const std::string &line, SrsProcSelfStat &r);
 
 // Stat disk iops
 // @see: http://stackoverflow.com/questions/4458183/how-the-util-of-iostat-is-computed
@@ -356,30 +389,30 @@ class SrsDiskStat
 {
 public:
     // Whether the data is ok.
-    bool ok;
+    bool ok_;
     // The time in ms when sample.
-    int64_t sample_time;
-    
+    int64_t sample_time_;
+
     // input(read) KBytes per seconds
-    int in_KBps;
+    int in_KBps_;
     // output(write) KBytes per seconds
-    int out_KBps;
-    
+    int out_KBps_;
+
     // @see: print_partition_stats() of iostat.c
     // but its value is [0, +], for instance, 0.1532 means 15.32%.
-    float busy;
+    float busy_;
     // for stat the busy%
-    SrsProcSystemStat cpu;
-    
+    SrsProcSystemStat cpu_;
+
 public:
     // @see: cat /proc/vmstat
     // The in(read) page count, pgpgin*1024 is the read bytes.
     // Total number of kilobytes the system paged in from disk per second.
-    unsigned long pgpgin;
+    unsigned long pgpgin_;
     // The out(write) page count, pgpgout*1024 is the write bytes.
     // Total number of kilobytes the system paged out to disk per second.
-    unsigned long pgpgout;
-    
+    unsigned long pgpgout_;
+
     // @see: https://www.kernel.org/doc/Documentation/iostats.txt
     // @see: http://tester-higkoo.googlecode.com/svn-history/r14/trunk/Tools/iostat/iostat.c
     // @see: cat /proc/diskstats
@@ -387,50 +420,50 @@ public:
     // Number of issued reads.
     // This is the total number of reads completed successfully.
     // Read I/O operations
-    unsigned int rd_ios;
+    unsigned int rd_ios_;
     // Number of reads merged
     // Reads merged
-    unsigned int rd_merges;
+    unsigned int rd_merges_;
     // Number of sectors read.
     // This is the total number of sectors read successfully.
     // Sectors read
-    unsigned long long rd_sectors;
+    unsigned long long rd_sectors_;
     // Number of milliseconds spent reading.
     // This is the total number of milliseconds spent by all reads
     // (as measured from make_request() to end_that_request_last()).
     // Time in queue + service for read
-    unsigned int rd_ticks;
+    unsigned int rd_ticks_;
     //
     // Number of writes completed.
     // This is the total number of writes completed successfully
     // Write I/O operations
-    unsigned int wr_ios;
+    unsigned int wr_ios_;
     // Number of writes merged Reads and writes which are adjacent
     // To each other may be merged for efficiency. Thus two 4K
     // reads may become one 8K read before it is ultimately
     // handed to the disk, and so it will be counted (and queued)
     // as only one I/O. This field lets you know how often this was done.
     // Writes merged
-    unsigned int wr_merges;
+    unsigned int wr_merges_;
     // Number of sectors written.
     // This is the total number of sectors written successfully.
     // Sectors written
-    unsigned long long wr_sectors;
+    unsigned long long wr_sectors_;
     // Number of milliseconds spent writing .
     // This is the total number of milliseconds spent by all writes
     // (as measured from make_request() to end_that_request_last()).
     // Time in queue + service for write
-    unsigned int wr_ticks;
+    unsigned int wr_ticks_;
     //
     // Number of I/Os currently in progress.
     // The only field that should go to zero.
     // Incremented as requests are given to appropriate request_queue_t
     // and decremented as they finish.
-    unsigned int nb_current;
+    unsigned int nb_current_;
     // Number of milliseconds spent doing I/Os.
     // This field is increased so long as field 9 is nonzero.
     // Time of requests in queue
-    unsigned int ticks;
+    unsigned int ticks_;
     // Number of milliseconds spent doing I/Os.
     // This field is incremented at each I/O start, I/O completion,
     // I/O merge, or read of these stats by the number of I/Os in
@@ -439,16 +472,20 @@ public:
     // provide an easy measure of both I/O completion time and
     // The backlog that may be accumulating.
     // Average queue length
-    unsigned int aveq;
-    
+    unsigned int aveq_;
+
 public:
     SrsDiskStat();
 };
 
 // Get disk stat, use cache to avoid performance problem.
-extern SrsDiskStat* srs_get_disk_stat();
+extern SrsDiskStat *srs_get_disk_stat();
 // The daemon st-thread will update it.
 extern void srs_update_disk_stat();
+// Internal helper function to read disk stats from /proc/diskstats
+// @param r the disk stat object to fill
+// @return true on success, false on failure
+extern bool srs_get_disk_diskstats_stat(SrsDiskStat &r);
 
 // Stat system memory info
 // @see: cat /proc/meminfo
@@ -456,39 +493,39 @@ class SrsMemInfo
 {
 public:
     // Whether the data is ok.
-    bool ok;
+    bool ok_;
     // The time in ms when sample.
-    int64_t sample_time;
+    int64_t sample_time_;
     // The percent of usage. 0.153 is 15.3%.
-    float percent_ram;
-    float percent_swap;
-    
+    float percent_ram_;
+    float percent_swap_;
+
     // data of /proc/meminfo
 public:
     // MemActive = MemTotal - MemFree
-    uint64_t MemActive;
+    uint64_t MemActive_;
     // RealInUse = MemActive - Buffers - Cached
-    uint64_t RealInUse;
+    uint64_t RealInUse_;
     // NotInUse = MemTotal - RealInUse
     //          = MemTotal - MemActive + Buffers + Cached
     //          = MemTotal - MemTotal + MemFree + Buffers + Cached
     //          = MemFree + Buffers + Cached
-    uint64_t NotInUse;
-    
-    unsigned long MemTotal;
-    unsigned long MemFree;
-    unsigned long Buffers;
-    unsigned long Cached;
-    unsigned long SwapTotal;
-    unsigned long SwapFree;
-    
+    uint64_t NotInUse_;
+
+    unsigned long MemTotal_;
+    unsigned long MemFree_;
+    unsigned long Buffers_;
+    unsigned long Cached_;
+    unsigned long SwapTotal_;
+    unsigned long SwapFree_;
+
 public:
     SrsMemInfo();
 };
 
 // Get system meminfo, use cache to avoid performance problem.
-extern SrsMemInfo* srs_get_meminfo();
-// The daemon st-thread will update it.
+extern SrsMemInfo *srs_get_meminfo();
+// The daemon st-thread will update it. Without /proc, as on macOS, the meminfo stays not ok.
 extern void srs_update_meminfo();
 
 // system cpu hardware info.
@@ -498,94 +535,137 @@ class SrsCpuInfo
 {
 public:
     // Whether the data is ok.
-    bool ok;
-    
+    bool ok_;
+
     // data of /proc/cpuinfo
 public:
     // The number of processors configured.
-    int nb_processors;
+    int nb_processors_;
     // The number of processors currently online (available).
-    int nb_processors_online;
-    
+    int nb_processors_online_;
+
 public:
     SrsCpuInfo();
 };
 
 // Get system cpu info, use cache to avoid performance problem.
-extern SrsCpuInfo* srs_get_cpuinfo();
+extern SrsCpuInfo *srs_get_cpuinfo();
 
 // The platform(os, srs) uptime/load summary
 class SrsPlatformInfo
 {
 public:
     // Whether the data is ok.
-    bool ok;
-    
+    bool ok_;
+
     // srs startup time, in ms.
-    int64_t srs_startup_time;
-    
+    int64_t srs_startup_time_;
+
 public:
     // @see: cat /proc/uptime
     // system startup time in seconds.
-    double os_uptime;
+    double os_uptime_;
     // system all cpu idle time in seconds.
     // @remark to cal the cpu ustime percent:
     //      os_ilde_time % (os_uptime * SrsCpuInfo.nb_processors_online)
-    double os_ilde_time;
-    
+    double os_ilde_time_;
+
     // @see: cat /proc/loadavg
-    double load_one_minutes;
-    double load_five_minutes;
-    double load_fifteen_minutes;
-    
+    double load_one_minutes_;
+    double load_five_minutes_;
+    double load_fifteen_minutes_;
+
 public:
     SrsPlatformInfo();
 };
 
 // Get platform info, use cache to avoid performance problem.
-extern SrsPlatformInfo* srs_get_platform_info();
+extern SrsPlatformInfo *srs_get_platform_info();
 // The daemon st-thread will update it.
 extern void srs_update_platform_info();
+
+class SrsSnmpUdpStat
+{
+public:
+    // Whether the data is ok.
+    bool ok_;
+    // send and recv buffer error delta
+    int rcv_buf_errors_delta_;
+    int snd_buf_errors_delta_;
+
+public:
+    // @see: cat /proc/uptimecat /proc/net/snmp|grep 'Udp:'
+    // @see: https://blog.packagecloud.io/eng/2017/02/06/monitoring-tuning-linux-networking-stack-sending-data/#procnetsnmp
+    // InDatagrams: incremented when recvmsg was used by a userland program to read datagram.
+    // also incremented when a UDP packet is encapsulated and sent back for processing.
+    unsigned long long in_datagrams_;
+    // NoPorts: incremented when UDP packets arrive destined for a port where no program is listening.
+    unsigned long long no_ports_;
+    // InErrors: incremented in several cases: no memory in the receive queue, when a bad checksum is seen,
+    // and if sk_add_backlog fails to add the datagram.
+    unsigned long long in_errors_;
+    // OutDatagrams: incremented when a UDP packet is handed down without error to the IP protocol layer to be sent.
+    unsigned long long out_datagrams_;
+    // RcvbufErrors: incremented when sock_queue_rcv_skb reports that no memory is available;
+    // this happens if sk->sk_rmem_alloc is greater than or equal to sk->sk_rcvbuf.
+    unsigned long long rcv_buf_errors_;
+    // SndbufErrors: incremented if the IP protocol layer reported an error when trying to send the packet
+    // and no error queue has been setup. also incremented if no send queue space or kernel memory are available.
+    unsigned long long snd_buf_errors_;
+    // InCsumErrors: incremented when a UDP checksum failure is detected.
+    // Note that in all cases I could find, InCsumErrors is incremented at the same time as InErrors.
+    // Thus, InErrors - InCsumErros should yield the count of memory related errors on the receive side.
+    unsigned long long in_csum_errors_;
+
+public:
+    SrsSnmpUdpStat();
+    ~SrsSnmpUdpStat();
+};
+
+// Get SNMP udp statistic, use cache to avoid performance problem.
+extern SrsSnmpUdpStat *srs_get_udp_snmp_stat();
+// The daemon st-thread will update it.
+void srs_update_udp_snmp_statistic();
 
 // The network device summary for each network device, for example, eth0, eth1, ethN
 class SrsNetworkDevices
 {
 public:
     // Whether the network device is ok.
-    bool ok;
-    
-    // 6-chars interfaces name
-    char name[7];
+    bool ok_;
+
+    // The interface name, up to 15 chars as Linux IFNAMSIZ allows, and the NUL.
+    char name_[16];
     // The sample time in ms.
-    int64_t sample_time;
-    
+    int64_t sample_time_;
+
 public:
     // data for receive.
-    unsigned long long rbytes;
-    unsigned long rpackets;
-    unsigned long rerrs;
-    unsigned long rdrop;
-    unsigned long rfifo;
-    unsigned long rframe;
-    unsigned long rcompressed;
-    unsigned long rmulticast;
-    
+    unsigned long long rbytes_;
+    unsigned long rpackets_;
+    unsigned long rerrs_;
+    unsigned long rdrop_;
+    unsigned long rfifo_;
+    unsigned long rframe_;
+    unsigned long rcompressed_;
+    unsigned long rmulticast_;
+
     // data for transmit
-    unsigned long long sbytes;
-    unsigned long spackets;
-    unsigned long serrs;
-    unsigned long sdrop;
-    unsigned long sfifo;
-    unsigned long scolls;
-    unsigned long scarrier;
-    unsigned long scompressed;
-    
+    unsigned long long sbytes_;
+    unsigned long spackets_;
+    unsigned long serrs_;
+    unsigned long sdrop_;
+    unsigned long sfifo_;
+    unsigned long scolls_;
+    unsigned long scarrier_;
+    unsigned long scompressed_;
+
 public:
     SrsNetworkDevices();
 };
 
 // Get network devices info, use cache to avoid performance problem.
-extern SrsNetworkDevices* srs_get_network_devices();
+extern SrsNetworkDevices *srs_get_network_devices();
 extern int srs_get_network_devices_count();
 // The daemon st-thread will update it.
 extern void srs_update_network_devices();
@@ -595,43 +675,43 @@ class SrsNetworkRtmpServer
 {
 public:
     // Whether the network device is ok.
-    bool ok;
-    
+    bool ok_;
+
     // The sample time in ms.
-    int64_t sample_time;
-    
+    int64_t sample_time_;
+
 public:
     // data for receive.
-    int64_t rbytes;
-    int rkbps;
-    int rkbps_30s;
-    int rkbps_5m;
-    
+    int64_t rbytes_;
+    int rkbps_;
+    int rkbps_30s_;
+    int rkbps_5m_;
+
     // data for transmit
-    int64_t sbytes;
-    int skbps;
-    int skbps_30s;
-    int skbps_5m;
-    
+    int64_t sbytes_;
+    int skbps_;
+    int skbps_30s_;
+    int skbps_5m_;
+
     // connections
     // @see: /proc/net/snmp
     // @see: /proc/net/sockstat
-    int nb_conn_sys;
-    int nb_conn_sys_et; // established
-    int nb_conn_sys_tw; // time wait
-    int nb_conn_sys_udp; // udp
-    
+    int nb_conn_sys_;
+    int nb_conn_sys_et_;  // established
+    int nb_conn_sys_tw_;  // time wait
+    int nb_conn_sys_udp_; // udp
+
     // retrieve from srs interface
-    int nb_conn_srs;
-    
+    int nb_conn_srs_;
+
 public:
     SrsNetworkRtmpServer();
 };
 
 // Get network devices info, use cache to avoid performance problem.
-extern SrsNetworkRtmpServer* srs_get_network_rtmp_server();
+extern SrsNetworkRtmpServer *srs_get_network_rtmp_server();
 // The daemon st-thread will update it.
-extern void srs_update_rtmp_server(int nb_conn, SrsKbps* kbps);
+extern void srs_update_rtmp_server(int nb_conn, SrsKbps *kbps);
 
 // Get local or peer ip.
 // Where local ip is the server ip which client connected.
@@ -640,6 +720,7 @@ extern std::string srs_get_local_ip(int fd);
 extern int srs_get_local_port(int fd);
 // Where peer ip is the client public ip which connected to server.
 extern std::string srs_get_peer_ip(int fd);
+extern int srs_get_peer_port(int fd);
 
 // Whether string is boolean
 //      is_bool("true") == true
@@ -648,15 +729,10 @@ extern std::string srs_get_peer_ip(int fd);
 extern bool srs_is_boolean(std::string str);
 
 // Dump summaries for /api/v1/summaries.
-extern void srs_api_dump_summaries(SrsJsonObject* obj);
-
-// Dump string(str in length) to hex, it will process min(limit, length) chars.
-extern std::string srs_string_dumps_hex(const std::string& str, const int& limit = INT_MAX);
-extern std::string srs_string_dumps_hex(const char* str, const int length, const int& limit = INT_MAX);
+extern void srs_api_dump_summaries(ISrsAppConfig *config, SrsJsonObject *obj);
 
 // Get ENV variable, which may starts with $.
-//      srs_getenv("EIP") === srs_getenv("$EIP")
-extern std::string srs_getenv(std::string key);
+//      srs_getenv("EIP") is srs_getenv("$EIP")
+extern std::string srs_getenv(const std::string &key);
 
 #endif
-

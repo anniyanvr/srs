@@ -1,175 +1,226 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_forward.hpp>
 
 #include <stdlib.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 using namespace std;
 
-#include <srs_app_source.hpp>
-#include <srs_app_st.hpp>
-#include <srs_kernel_error.hpp>
-#include <srs_kernel_log.hpp>
 #include <srs_app_config.hpp>
-#include <srs_app_pithy_print.hpp>
-#include <srs_rtmp_stack.hpp>
-#include <srs_protocol_utility.hpp>
-#include <srs_protocol_kbps.hpp>
-#include <srs_rtmp_msg_array.hpp>
-#include <srs_app_utility.hpp>
-#include <srs_protocol_amf0.hpp>
-#include <srs_kernel_codec.hpp>
-#include <srs_core_autofree.hpp>
-#include <srs_kernel_utility.hpp>
+#include <srs_app_factory.hpp>
 #include <srs_app_rtmp_conn.hpp>
+#include <srs_app_rtmp_source.hpp>
+#include <srs_app_st.hpp>
+#include <srs_app_statistic.hpp>
+#include <srs_app_utility.hpp>
+#include <srs_core_autofree.hpp>
+#include <srs_kernel_codec.hpp>
+#include <srs_kernel_error.hpp>
+#include <srs_kernel_kbps.hpp>
+#include <srs_kernel_log.hpp>
+#include <srs_kernel_pithy_print.hpp>
+#include <srs_kernel_utility.hpp>
+#include <srs_protocol_amf0.hpp>
+#include <srs_protocol_rtmp_msg_array.hpp>
+#include <srs_protocol_rtmp_stack.hpp>
+#include <srs_protocol_utility.hpp>
 
-SrsForwarder::SrsForwarder(SrsOriginHub* h)
+ISrsForwarder::ISrsForwarder()
 {
-    hub = h;
-    
-    req = NULL;
-    sh_video = sh_audio = NULL;
-    
-    sdk = NULL;
-    trd = new SrsDummyCoroutine();
-    queue = new SrsMessageQueue();
-    jitter = new SrsRtmpJitter();
+}
+
+ISrsForwarder::~ISrsForwarder()
+{
+}
+
+SrsForwarder::SrsForwarder(ISrsOriginHub *h, ISrsRequest *req)
+{
+    hub_ = h;
+
+    SrsRand rand;
+    id_ = "fwd-" + rand.gen_str(7);
+
+    req_ = NULL;
+    stream_req_ = req->copy();
+    metadata_ = sh_video_ = sh_audio_ = NULL;
+    wait_keyframe_ = false;
+
+    sdk_ = NULL;
+    trd_ = new SrsDummyCoroutine();
+    queue_ = new SrsMessageQueue();
+    jitter_ = new SrsRtmpJitter();
+
+    app_factory_ = _srs_app_factory;
+    config_ = _srs_config;
+    stat_ = _srs_stat;
 }
 
 SrsForwarder::~SrsForwarder()
 {
-    srs_freep(sdk);
-    srs_freep(trd);
-    srs_freep(queue);
-    srs_freep(jitter);
-    
-    srs_freep(sh_video);
-    srs_freep(sh_audio);
+    srs_freep(sdk_);
+    srs_freep(trd_);
+    srs_freep(queue_);
+    srs_freep(jitter_);
+
+    srs_freep(metadata_);
+    srs_freep(sh_video_);
+    srs_freep(sh_audio_);
+
+    srs_freep(req_);
+    srs_freep(stream_req_);
+
+    app_factory_ = NULL;
+    config_ = NULL;
+    stat_ = NULL;
 }
 
-srs_error_t SrsForwarder::initialize(SrsRequest* r, string ep)
+srs_error_t SrsForwarder::initialize(ISrsRequest *r, string ep)
 {
     srs_error_t err = srs_success;
-    
+
     // it's ok to use the request object,
-    // SrsSource already copy it and never delete it.
-    req = r;
-    
+    // SrsLiveSource already copy it and never delete it.
+    req_ = r->copy();
+
     // the ep(endpoint) to forward to
-    ep_forward = ep;
-    
+    ep_forward_ = ep;
+
+    // Check if the forward destination is RTMPS URL
+    // SRS forward only supports plain RTMP protocol, not RTMPS (RTMP over SSL/TLS)
+    if (ep_forward_.find("rtmps://") != string::npos) {
+        return srs_error_new(ERROR_NOT_SUPPORTED, "forward does not support RTMPS destination=%s", ep_forward_.c_str());
+    }
+
+    // Remember the source context id.
+    source_cid_ = _srs_context->get_id();
+
     return err;
 }
 
 void SrsForwarder::set_queue_size(srs_utime_t queue_size)
 {
-    queue->set_queue_size(queue_size);
+    queue_->set_queue_size(queue_size);
 }
 
 srs_error_t SrsForwarder::on_publish()
 {
     srs_error_t err = srs_success;
-    
-    srs_freep(trd);
-    trd = new SrsSTCoroutine("forward", this);
-    if ((err = trd->start()) != srs_success) {
+
+    stat_->on_forward_start(id_, stream_req_, destination_url());
+
+    srs_freep(trd_);
+    trd_ = new SrsSTCoroutine("forward", this);
+    if ((err = trd_->start()) != srs_success) {
         return srs_error_wrap(err, "start thread");
     }
-    
+
     return err;
 }
 
 void SrsForwarder::on_unpublish()
 {
-    trd->stop();
-    sdk->close();
+    trd_->stop();
+    if (sdk_)
+        sdk_->close();
+
+    stat_->on_forward_stop(id_);
 }
 
-srs_error_t SrsForwarder::on_meta_data(SrsSharedPtrMessage* shared_metadata)
+srs_error_t SrsForwarder::on_meta_data(SrsMediaPacket *shared_metadata)
 {
     srs_error_t err = srs_success;
-    
-    SrsSharedPtrMessage* metadata = shared_metadata->copy();
-    
+
+    SrsMediaPacket *metadata = shared_metadata->copy();
+
     // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter->correct(metadata, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    if ((err = jitter_->correct(metadata, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
-    
-    if ((err = queue->enqueue(metadata)) != srs_success) {
+
+    srs_freep(metadata_);
+    metadata_ = metadata->copy();
+
+    if ((err = enqueue(metadata)) != srs_success) {
         return srs_error_wrap(err, "enqueue metadata");
     }
-    
+
     return err;
 }
 
-srs_error_t SrsForwarder::on_audio(SrsSharedPtrMessage* shared_audio)
+srs_error_t SrsForwarder::on_audio(SrsMediaPacket *shared_audio)
 {
     srs_error_t err = srs_success;
-    
-    SrsSharedPtrMessage* msg = shared_audio->copy();
-    
+
+    SrsMediaPacket *msg = shared_audio->copy();
+
     // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
-    
-    if (SrsFlvAudio::sh(msg->payload, msg->size)) {
-        srs_freep(sh_audio);
-        sh_audio = msg->copy();
+
+    if (SrsFlvAudio::sh(msg->payload(), msg->size())) {
+        srs_freep(sh_audio_);
+        sh_audio_ = msg->copy();
     }
-    
-    if ((err = queue->enqueue(msg)) != srs_success) {
+
+    if ((err = enqueue(msg)) != srs_success) {
         return srs_error_wrap(err, "enqueue audio");
     }
-    
+
     return err;
 }
 
-srs_error_t SrsForwarder::on_video(SrsSharedPtrMessage* shared_video)
+srs_error_t SrsForwarder::on_video(SrsMediaPacket *shared_video)
 {
     srs_error_t err = srs_success;
-    
-    SrsSharedPtrMessage* msg = shared_video->copy();
-    
+
+    SrsMediaPacket *msg = shared_video->copy();
+
     // TODO: FIXME: config the jitter of Forwarder.
-    if ((err = jitter->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
+    if ((err = jitter_->correct(msg, SrsRtmpJitterAlgorithmOFF)) != srs_success) {
         return srs_error_wrap(err, "jitter");
     }
-    
-    if (SrsFlvVideo::sh(msg->payload, msg->size)) {
-        srs_freep(sh_video);
-        sh_video = msg->copy();
+
+    bool is_sh = SrsFlvVideo::sh(msg->payload(), msg->size());
+    if (is_sh) {
+        srs_freep(sh_video_);
+        sh_video_ = msg->copy();
     }
-    
-    if ((err = queue->enqueue(msg)) != srs_success) {
+
+    // Drop video until the next keyframe; a sequence header always passes.
+    if (wait_keyframe_ && msg->is_video() && !is_sh) {
+        if (!SrsFlvVideo::keyframe(msg->payload(), msg->size())) {
+            srs_freep(msg);
+            return err;
+        }
+        wait_keyframe_ = false;
+    }
+
+    if ((err = enqueue(msg)) != srs_success) {
         return srs_error_wrap(err, "enqueue video");
     }
-    
+
+    return err;
+}
+
+srs_error_t SrsForwarder::enqueue(SrsMediaPacket *msg)
+{
+    srs_error_t err = srs_success;
+
+    bool is_overflow = false;
+    if ((err = queue_->enqueue(msg, &is_overflow)) != srs_success) {
+        return srs_error_wrap(err, "enqueue");
+    }
+
+    // The shrink dropped the queued media, so the destination must restart at a keyframe.
+    if (is_overflow) {
+        wait_keyframe_ = true;
+    }
+
     return err;
 }
 
@@ -179,11 +230,14 @@ srs_error_t SrsForwarder::on_video(SrsSharedPtrMessage* shared_video)
 srs_error_t SrsForwarder::cycle()
 {
     srs_error_t err = srs_success;
-    
+
+    srs_trace("Forwarder: Start forward %s of source=[%s] to %s",
+              req_->get_stream_url().c_str(), source_cid_.c_str(), ep_forward_.c_str());
+
     while (true) {
         // We always check status first.
         // @see https://github.com/ossrs/srs/issues/1634#issuecomment-597571561
-        if ((err = trd->pull()) != srs_success) {
+        if ((err = trd_->pull()) != srs_success) {
             return srs_error_wrap(err, "forwarder");
         }
 
@@ -192,121 +246,148 @@ srs_error_t SrsForwarder::cycle()
             srs_freep(err);
         }
 
+        // Wait to retry.
+        stat_->on_forward_state(id_, SrsForwardStateRetrying);
+
+        // Never wait if thread error, fast quit.
+        // @see https://github.com/ossrs/srs/pull/2284
+        if ((err = trd_->pull()) != srs_success) {
+            return srs_error_wrap(err, "forwarder");
+        }
+
         srs_usleep(SRS_FORWARDER_CIMS);
     }
-    
+
     return err;
 }
 
 srs_error_t SrsForwarder::do_cycle()
 {
     srs_error_t err = srs_success;
-    
-    std::string url;
-    if (true) {
-        std::string server;
-        int port = SRS_CONSTS_RTMP_DEFAULT_PORT;
-        
-        // parse host:port from hostport.
-        srs_parse_hostport(ep_forward, server, port);
-        
-        // generate url
-        url = srs_generate_rtmp_url(server, port, req->host, req->vhost, req->app, req->stream, req->param);
-    }
-    
-    srs_freep(sdk);
+
+    stat_->on_forward_state(id_, SrsForwardStateConnecting);
+
+    std::string url = destination_url();
+
+    srs_freep(sdk_);
     srs_utime_t cto = SRS_FORWARDER_CIMS;
     srs_utime_t sto = SRS_CONSTS_RTMP_TIMEOUT;
-    sdk = new SrsSimpleRtmpClient(url, cto, sto);
-    
-    if ((err = sdk->connect()) != srs_success) {
+    sdk_ = app_factory_->create_rtmp_client(url, cto, sto);
+
+    if ((err = sdk_->connect()) != srs_success) {
         return srs_error_wrap(err, "sdk connect url=%s, cto=%dms, sto=%dms.", url.c_str(), srsu2msi(cto), srsu2msi(sto));
     }
-    
-    if ((err = sdk->publish(_srs_config->get_chunk_size(req->vhost))) != srs_success) {
+
+    // For RTMP client, we pass the vhost in tcUrl when connecting,
+    // so we publish without vhost in stream.
+    string stream;
+    if ((err = sdk_->publish(config_->get_chunk_size(req_->vhost_), false, &stream)) != srs_success) {
         return srs_error_wrap(err, "sdk publish");
     }
-    
-    if ((err = hub->on_forwarder_start(this)) != srs_success) {
+
+    if ((err = hub_->on_forwarder_start(this)) != srs_success) {
         return srs_error_wrap(err, "notify hub start");
     }
-    
+
+    // Start fresh from live: drop the media queued before the publish, which forward() replaces
+    // by the cached metadata and sequence headers, and drop video until the next keyframe.
+    queue_->clear();
+    wait_keyframe_ = true;
+
+    stat_->on_forward_state(id_, SrsForwardStateForwarding);
+
     if ((err = forward()) != srs_success) {
         return srs_error_wrap(err, "forward");
     }
-    
+
+    srs_trace("forward publish url %s, stream=%s%s as %s", url.c_str(), req_->stream_.c_str(), req_->param_.c_str(), stream.c_str());
+
     return err;
+}
+
+std::string SrsForwarder::destination_url()
+{
+    std::string server;
+    int port = SRS_CONSTS_RTMP_DEFAULT_PORT;
+
+    // parse host:port from hostport.
+    srs_net_split_hostport(ep_forward_, server, port);
+
+    // generate url
+    return srs_net_url_encode_rtmp_url(server, port, req_->host_, req_->vhost_, req_->app_, req_->stream_, req_->param_);
 }
 
 #define SYS_MAX_FORWARD_SEND_MSGS 128
 srs_error_t SrsForwarder::forward()
 {
     srs_error_t err = srs_success;
-    
-    sdk->set_recv_timeout(SRS_CONSTS_RTMP_PULSE);
-    
-    SrsPithyPrint* pprint = SrsPithyPrint::create_forwarder();
-    SrsAutoFree(SrsPithyPrint, pprint);
-    
+
+    sdk_->set_recv_timeout(SRS_CONSTS_RTMP_PULSE);
+
+    SrsUniquePtr<SrsPithyPrint> pprint(SrsPithyPrint::create_forwarder());
+
     SrsMessageArray msgs(SYS_MAX_FORWARD_SEND_MSGS);
-    
-    // update sequence header
+
+    // Send the metadata and sequence headers first.
     // TODO: FIXME: maybe need to zero the sequence header timestamp.
-    if (sh_video) {
-        if ((err = sdk->send_and_free_message(sh_video->copy())) != srs_success) {
+    if (metadata_) {
+        if ((err = sdk_->send_and_free_message(metadata_->copy())) != srs_success) {
+            return srs_error_wrap(err, "send metadata");
+        }
+    }
+    if (sh_video_) {
+        if ((err = sdk_->send_and_free_message(sh_video_->copy())) != srs_success) {
             return srs_error_wrap(err, "send video sh");
         }
     }
-    if (sh_audio) {
-        if ((err = sdk->send_and_free_message(sh_audio->copy())) != srs_success) {
+    if (sh_audio_) {
+        if ((err = sdk_->send_and_free_message(sh_audio_->copy())) != srs_success) {
             return srs_error_wrap(err, "send audio sh");
         }
     }
-    
+
     while (true) {
-        if ((err = trd->pull()) != srs_success) {
+        if ((err = trd_->pull()) != srs_success) {
             return srs_error_wrap(err, "thread quit");
         }
-        
+
         pprint->elapse();
-        
+
         // read from client.
         if (true) {
-            SrsCommonMessage* msg = NULL;
-            err = sdk->recv_message(&msg);
-            
+            SrsRtmpCommonMessage *msg = NULL;
+            err = sdk_->recv_message(&msg);
+
             if (err != srs_success && srs_error_code(err) != ERROR_SOCKET_TIMEOUT) {
                 return srs_error_wrap(err, "receive control message");
             }
-            srs_error_reset(err);
-            
+            srs_freep(err);
+
             srs_freep(msg);
         }
-        
+
         // forward all messages.
-        // each msg in msgs.msgs must be free, for the SrsMessageArray never free them.
+        // each msg in msgs.msgs_ must be free, for the SrsMessageArray never free them.
         int count = 0;
-        if ((err = queue->dump_packets(msgs.max, msgs.msgs, count)) != srs_success) {
+        if ((err = queue_->dump_packets(msgs.max_, msgs.msgs_, count)) != srs_success) {
             return srs_error_wrap(err, "dump packets");
         }
-        
+
         // pithy print
         if (pprint->can_print()) {
-            sdk->kbps_sample(SRS_CONSTS_LOG_FOWARDER, pprint->age(), count);
+            sdk_->kbps_sample(SRS_CONSTS_LOG_FOWARDER, pprint->age(), count);
         }
-        
+
         // ignore when no messages.
         if (count <= 0) {
             continue;
         }
-        
+
         // sendout messages, all messages are freed by send_and_free_messages().
-        if ((err = sdk->send_and_free_messages(msgs.msgs, count)) != srs_success) {
+        if ((err = sdk_->send_and_free_messages(msgs.msgs_, count)) != srs_success) {
             return srs_error_wrap(err, "send messages");
         }
     }
-    
+
     return err;
 }
-
-

@@ -5,34 +5,38 @@
     <meta charset="utf-8">
     <style>
         body{
-            padding-top: 55px;
+            padding-top: 30px;
         }
     </style>
     <link rel="stylesheet" type="text/css" href="css/bootstrap.min.css"/>
-    <script type="text/javascript" src="js/jquery-1.10.2.min.js"></script>
+    <script type="text/javascript" src="js/jquery-1.12.2.min.js"></script>
     <script type="text/javascript" src="js/adapter-7.4.0.min.js"></script>
+    <script type="text/javascript" src="js/srs.sdk.js"></script>
     <script type="text/javascript" src="js/winlin.utility.js"></script>
     <script type="text/javascript" src="js/srs.page.js"></script>
 </head>
 <body>
-<img src='https://ossrs.net/gif/v1/sls.gif?site=ossrs.net&path=/player/rtcpublisher'/>
 <div class="navbar navbar-fixed-top">
     <div class="navbar-inner">
         <div class="container">
             <a id="srs_index" class="brand" href="https://github.com/ossrs/srs">SRS</a>
             <div class="nav-collapse collapse">
                 <ul class="nav">
-                    <li><a id="nav_srs_player" href="srs_player.html">SRS播放器</a></li>
+                    <li><a id="nav_srs_player" href="srs_player.html">LivePlayer</a></li>
                     <li><a id="nav_rtc_player" href="rtc_player.html">RTC播放器</a></li>
                     <li class="active"><a id="nav_rtc_publisher" href="rtc_publisher.html">RTC推流</a></li>
+                    <li><a id="nav_whip" href="whip.html">WHIP</a></li>
+                    <li><a id="nav_whep" href="whip.html">WHEP</a></li>
+                    <li><a  href="http://ossrs.net/srs.release/releases/app.html">iOS/Andriod</a></li>
                     <!--<li><a id="nav_srs_publisher" href="srs_publisher.html">SRS编码器</a></li>-->
                     <!--<li><a id="nav_srs_chat" href="srs_chat.html">SRS会议</a></li>-->
-                    <!--<li><a id="nav_srs_bwt" href="srs_bwt.html">SRS测网速</a></li>-->
-                    <!--<li><a id="nav_jwplayer6" href="jwplayer6.html">JWPlayer6播放器</a></li>-->
-                    <!--<li><a id="nav_osmf" href="osmf.html">AdobeOSMF播放器</a></li>-->
                     <!--<li><a id="nav_vlc" href="vlc.html">VLC播放器</a></li>-->
-                    <li><a id="nav_gb28181" href="srs_gb28181.html">GB28181</a></li>
-                    <li><a href="https://github.com/ossrs/srs">源码</a></li>
+                    <!--<li><a id="nav_gb28181" href="srs_gb28181.html">GB28181</a></li>-->
+                    <li>
+                        <a href="https://github.com/ossrs/srs">
+                            <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/ossrs/srs?style=social">
+                        </a>
+                    </li>
                 </ul>
             </div>
         </div>
@@ -51,113 +55,126 @@
     <label></label>
     SessionID: <span id='sessionid'></span>
 
+    <label></label>
+    Audio: <span id='acodecs'></span><br/>
+    Video: <span id='vcodecs'></span>
+
+    <label></label>
+    Simulator: <a href='#' id='simulator-drop'>Drop</a>
+
     <footer>
         <p></p>
         <p><a href="https://github.com/ossrs/srs">SRS Team &copy; 2020</a></p>
     </footer>
 </div>
 <script type="text/javascript">
-    var pc = null; // Global handler to do cleanup when replaying.
-    $(function(){
-        var startPublish = function() {
-            $('#rtc_media_player').show();
-            var urlObject = parse_rtmp_url($("#txt_url").val());
-            var schema = window.location.protocol;
+$(function(){
+    // Convert webrtc:// URL to WHIP URL
+    // webrtc://domain:port/app/stream => http://domain:1985/rtc/v1/whip/?app=app&stream=stream
+    var convertToWhipUrl = function(webrtcUrl) {
+        var a = document.createElement("a");
+        a.href = webrtcUrl.replace("webrtc://", "http://").replace("rtc://", "http://");
 
-            // Close PC when user replay.
-            if (pc) {
-                pc.close();
+        var schema = window.location.protocol;
+        var port = a.port || 1985;
+        if (schema === 'https:') {
+            port = a.port || 443;
+        }
+
+        var app = a.pathname.substring(1, a.pathname.lastIndexOf("/"));
+        var stream = a.pathname.slice(a.pathname.lastIndexOf("/") + 1);
+
+        var whipUrl = schema + '//' + a.hostname + ':' + port + '/rtc/v1/whip/?app=' + app + '&stream=' + stream;
+
+        // Append query parameters from original URL
+        if (a.search) {
+            whipUrl += '&' + a.search.substring(1);
+        }
+
+        return whipUrl;
+    };
+
+    var sdk = null; // Global handler to do cleanup when republishing.
+    var statsTimer = null; // Timer for getting codec stats.
+    var startPublish = function() {
+        $('#rtc_media_player').show();
+
+        // Close PC when user replay.
+        if (sdk) {
+            sdk.close();
+        }
+        if (statsTimer) {
+            clearInterval(statsTimer);
+            statsTimer = null;
+        }
+        sdk = new SrsRtcWhipWhepAsync();
+
+        // User should set the stream when publish is done, @see https://webrtc.org/getting-started/media-devices
+        // However SRS SDK provides a consist API like https://webrtc.org/getting-started/remote-streams
+        $('#rtc_media_player').prop('srcObject', sdk.stream);
+        // Optional callback, SDK will add track to stream.
+        // sdk.ontrack = function (event) { console.log('Got track', event); sdk.stream.addTrack(event.track); };
+
+        // https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/getStats
+        statsTimer = setInterval(function() {
+            sdk.pc.getStats(null).then(function(stats) {
+                var audioStatsOutput = SrsRtcFormatStats(stats, 'audio');
+                var videoStatsOutput = SrsRtcFormatStats(stats, 'video');
+
+                $('#acodecs').html(audioStatsOutput);
+                $('#vcodecs').html(videoStatsOutput);
+
+                if (audioStatsOutput && videoStatsOutput) {
+                    clearInterval(statsTimer);
+                    statsTimer = null;
+                }
+            });
+        }, 1000);
+
+        // For example: webrtc://r.ossrs.net/live/livestream
+        // Convert to WHIP URL: http://localhost:1985/rtc/v1/whip/?app=live&stream=livestream
+        var url = $("#txt_url").val();
+        var whipUrl = convertToWhipUrl(url);
+        sdk.publish(whipUrl).then(function(session){
+            $('#sessionid').html(session.sessionid);
+            $('#simulator-drop').attr('href', session.simulator + '?drop=1&username=' + session.sessionid);
+        }).catch(function (reason) {
+            // Throw by sdk.
+            if (reason instanceof SrsError) {
+                if (reason.name === 'HttpsRequiredError') {
+                    alert(`WebRTC推流必须是HTTPS或者localhost：${reason.name} ${reason.message}`);
+                } else {
+                    alert(`${reason.name} ${reason.message}`);
+                }
+            }
+            // See https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia#exceptions
+            if (reason instanceof DOMException) {
+                if (reason.name === 'NotFoundError') {
+                    alert(`找不到麦克风和摄像头设备：getUserMedia ${reason.name} ${reason.message}`);
+                } else if (reason.name === 'NotAllowedError') {
+                    alert(`你禁止了网页访问摄像头和麦克风：getUserMedia ${reason.name} ${reason.message}`);
+                } else if (['AbortError', 'NotAllowedError', 'NotFoundError', 'NotReadableError', 'OverconstrainedError', 'SecurityError', 'TypeError'].includes(reason.name)) {
+                    alert(`getUserMedia ${reason.name} ${reason.message}`);
+                }
             }
 
-            pc = new RTCPeerConnection(null);
-            pc.addTransceiver("audio", {direction: "sendonly"});
-            pc.addTransceiver("video", {direction: "sendonly"});
+            sdk.close();
+            $('#rtc_media_player').hide();
+            console.error(reason);
+        });
+    };
 
-            var constraints = {
-                audio: true, video: {
-                    height: { max: 320 }
-                }
-            };
-            navigator.mediaDevices.getUserMedia(
-                constraints
-            ).then(function(stream) {
-                console.log('Got stream with constraints: ', constraints);
-                $('#rtc_media_player').prop('srcObject', stream);
+    $('#rtc_media_player').hide();
+    var query = parse_query_string();
+    srs_init_rtc("#txt_url", query);
 
-                pc.addStream(stream);
-
-                return new Promise(function(resolve, reject) {
-                    pc.createOffer(function(offer){
-                        resolve(offer);
-                    },function(reason){
-                        reject(reason);
-                    });
-                });
-            }).then(function(offer) {
-                return pc.setLocalDescription(offer).then(function(){ return offer; });
-            }).then(function(offer) {
-                return new Promise(function(resolve, reject) {
-                    var port = urlObject.port || 1985;
-
-                    // @see https://github.com/rtcdn/rtcdn-draft
-                    var api = urlObject.user_query.publish || '/rtc/v1/publish/';
-                    if (api.lastIndexOf('/') != api.length - 1) {
-                        api += '/';
-                    }
-
-                    var url = schema + '//' + urlObject.server + ':' + port + api;
-                    for (var key in urlObject.user_query) {
-                        if (key != 'api' && key != 'publish') {
-                            url += '&' + key + '=' + urlObject.user_query[key];
-                        }
-                    }
-                    // Replace /rtc/v1/publish/&k=v to /rtc/v1/publish/?k=v
-                    url = url.replace(api + '&', api + '?');
-
-                    // @see https://github.com/rtcdn/rtcdn-draft
-                    var data = {
-                        api: url, streamurl: urlObject.url, clientip: null, sdp: offer.sdp
-                    };
-                    console.log("Generated offer: ", data);
-
-                    $.ajax({
-                        type: "POST", url: url, data: JSON.stringify(data),
-                        contentType:'application/json', dataType: 'json'
-                    }).done(function(data) {
-                        console.log("Got answer: ", data);
-                        if (data.code) {
-                            reject(data); return;
-                        }
-                        $('#sessionid').html(data.sessionid);
-                        resolve(data.sdp);
-                    }).fail(function(reason){
-                        reject(reason);
-                    });
-                });
-            }).then(function(answer) {
-                return pc.setRemoteDescription(new RTCSessionDescription({type: 'answer', sdp: answer}));
-            }).catch(function(reason) {
-                pc.getLocalStreams().forEach(function(stream){
-                    stream.getTracks().forEach(function(track) {
-                        track.stop();
-                    });
-                });
-                pc.close(); $('#rtc_media_player').hide();
-                throw reason;
-            });
-        };
-
-        $('#rtc_media_player').hide();
-        var query = parse_query_string();
-        srs_init_rtc("#txt_url", query);
-
-        $("#btn_publish").click(startPublish);
-        if (query.autostart === 'true') {
-            startPublish();
-        }
-    });
+    $("#btn_publish").click(startPublish);
+    // Never play util windows loaded @see https://github.com/ossrs/srs/issues/2732
+    if (query.autostart === 'true') {
+        window.addEventListener("load", function(){ startPublish(); });
+    }
+});
 </script>
 </body>
 </html>
 
-</html>

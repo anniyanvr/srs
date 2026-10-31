@@ -1,66 +1,61 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #include <srs_app_coworkers.hpp>
 
 #include <stdlib.h>
 using namespace std;
 
-#include <srs_protocol_json.hpp>
-#include <srs_kernel_error.hpp>
-#include <srs_rtmp_stack.hpp>
 #include <srs_app_config.hpp>
-#include <srs_protocol_utility.hpp>
-#include <srs_service_utility.hpp>
+#include <srs_kernel_error.hpp>
 #include <srs_kernel_utility.hpp>
+#include <srs_protocol_json.hpp>
+#include <srs_protocol_rtmp_stack.hpp>
+#include <srs_protocol_utility.hpp>
 
-SrsCoWorkers* SrsCoWorkers::_instance = NULL;
+ISrsCoWorkers::ISrsCoWorkers()
+{
+}
+
+ISrsCoWorkers::~ISrsCoWorkers()
+{
+}
+
+SrsCoWorkers *_srs_coworkers = NULL;
+
+SrsCoWorkers *SrsCoWorkers::instance_ = NULL;
 
 SrsCoWorkers::SrsCoWorkers()
 {
+    config_ = _srs_config;
 }
 
 SrsCoWorkers::~SrsCoWorkers()
 {
-    map<string, SrsRequest*>::iterator it;
-    for (it = streams.begin(); it != streams.end(); ++it) {
-        SrsRequest* r = it->second;
+    map<string, ISrsRequest *>::iterator it;
+    for (it = streams_.begin(); it != streams_.end(); ++it) {
+        ISrsRequest *r = it->second;
         srs_freep(r);
     }
-    streams.clear();
+    streams_.clear();
+
+    config_ = NULL;
 }
 
-SrsCoWorkers* SrsCoWorkers::instance()
+SrsCoWorkers *SrsCoWorkers::instance()
 {
-    if (!_instance) {
-        _instance = new SrsCoWorkers();
+    if (!instance_) {
+        instance_ = new SrsCoWorkers();
     }
-    return _instance;
+    return instance_;
 }
 
-SrsJsonAny* SrsCoWorkers::dumps(string vhost, string coworker, string app, string stream)
+SrsJsonAny *SrsCoWorkers::dumps(string vhost, string coworker, string app, string stream)
 {
-    SrsRequest* r = find_stream_info(vhost, app, stream);
+    ISrsRequest *r = find_stream_info(vhost, app, stream);
     if (!r) {
         // TODO: FIXME: Find stream from our origin util return to the start point.
         return SrsJsonAny::null();
@@ -69,12 +64,12 @@ SrsJsonAny* SrsCoWorkers::dumps(string vhost, string coworker, string app, strin
     // The service port parsing from listen port.
     string listen_host;
     int listen_port = SRS_CONSTS_RTMP_DEFAULT_PORT;
-    vector<string> listen_hostports = _srs_config->get_listens();
+    vector<string> listen_hostports = config_->get_listens();
     if (!listen_hostports.empty()) {
         string list_hostport = listen_hostports.at(0);
 
         if (list_hostport.find(":") != string::npos) {
-            srs_parse_hostport(list_hostport, listen_host, listen_port);
+            srs_net_split_hostport(list_hostport, listen_host, listen_port);
         } else {
             listen_port = ::atoi(list_hostport.c_str());
         }
@@ -92,79 +87,79 @@ SrsJsonAny* SrsCoWorkers::dumps(string vhost, string coworker, string app, strin
         int coworker_port;
         string coworker_host = coworker;
         if (coworker.find(":") != string::npos) {
-            srs_parse_hostport(coworker, coworker_host, coworker_port);
+            srs_net_split_hostport(coworker, coworker_host, coworker_port);
         }
 
         service_ip = coworker_host;
     }
     if (service_ip.empty()) {
-        service_ip = srs_get_public_internet_address();
+        SrsProtocolUtility utility;
+        service_ip = utility.public_internet_address();
     }
 
     // The backend API endpoint.
-    string backend = _srs_config->get_http_api_listen();
+    string backend = config_->get_http_api_listens().at(0);
     if (backend.find(":") == string::npos) {
         backend = service_ip + ":" + backend;
     }
-    
+
     // The routers to detect loop and identify path.
-    SrsJsonArray* routers = SrsJsonAny::array()->append(SrsJsonAny::str(backend.c_str()));
+    SrsJsonArray *routers = SrsJsonAny::array()->append(SrsJsonAny::str(backend.c_str()));
 
     srs_trace("Redirect vhost=%s, path=%s/%s to ip=%s, port=%d, api=%s",
-        vhost.c_str(), app.c_str(), stream.c_str(), service_ip.c_str(), listen_port, backend.c_str());
+              vhost.c_str(), app.c_str(), stream.c_str(), service_ip.c_str(), listen_port, backend.c_str());
 
     return SrsJsonAny::object()
         ->set("ip", SrsJsonAny::str(service_ip.c_str()))
         ->set("port", SrsJsonAny::integer(listen_port))
-        ->set("vhost", SrsJsonAny::str(r->vhost.c_str()))
+        ->set("vhost", SrsJsonAny::str(r->vhost_.c_str()))
         ->set("api", SrsJsonAny::str(backend.c_str()))
         ->set("routers", routers);
 }
 
-SrsRequest* SrsCoWorkers::find_stream_info(string vhost, string app, string stream)
+ISrsRequest *SrsCoWorkers::find_stream_info(string vhost, string app, string stream)
 {
     // First, we should parse the vhost, if not exists, try default vhost instead.
-    SrsConfDirective* conf = _srs_config->get_vhost(vhost, true);
+    SrsConfDirective *conf = config_->get_vhost(vhost, true);
     if (!conf) {
         return NULL;
     }
-    
+
     // Get stream information from local cache.
-    string url = srs_generate_stream_url(conf->arg0(), app, stream);
-    map<string, SrsRequest*>::iterator it = streams.find(url);
-    if (it == streams.end()) {
+    string url = srs_net_url_encode_sid(conf->arg0(), app, stream);
+    map<string, ISrsRequest *>::iterator it = streams_.find(url);
+    if (it == streams_.end()) {
         return NULL;
     }
-    
+
     return it->second;
 }
 
-srs_error_t SrsCoWorkers::on_publish(SrsSource* s, SrsRequest* r)
+srs_error_t SrsCoWorkers::on_publish(ISrsRequest *r)
 {
     srs_error_t err = srs_success;
-    
+
     string url = r->get_stream_url();
-    
+
     // Delete the previous stream informations.
-    map<string, SrsRequest*>::iterator it = streams.find(url);
-    if (it != streams.end()) {
+    map<string, ISrsRequest *>::iterator it = streams_.find(url);
+    if (it != streams_.end()) {
         srs_freep(it->second);
     }
-    
+
     // Always use the latest one.
-    streams[url] = r->copy();
-    
+    streams_[url] = r->copy();
+
     return err;
 }
 
-void SrsCoWorkers::on_unpublish(SrsSource* s, SrsRequest* r)
+void SrsCoWorkers::on_unpublish(ISrsRequest *r)
 {
     string url = r->get_stream_url();
-    
-    map<string, SrsRequest*>::iterator it = streams.find(url);
-    if (it != streams.end()) {
+
+    map<string, ISrsRequest *>::iterator it = streams_.find(url);
+    if (it != streams_.end()) {
         srs_freep(it->second);
-        streams.erase(it);
+        streams_.erase(it);
     }
 }
-

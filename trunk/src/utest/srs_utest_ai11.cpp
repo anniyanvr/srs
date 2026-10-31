@@ -1,0 +1,5382 @@
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
+#include <srs_utest_ai11.hpp>
+
+using namespace std;
+
+#include <srs_app_config.hpp>
+#include <srs_app_rtc_conn.hpp>
+#include <srs_app_rtc_dtls.hpp>
+#include <srs_app_rtc_network.hpp>
+#include <srs_app_rtmp_source.hpp>
+#include <srs_app_srt_source.hpp>
+#include <srs_kernel_error.hpp>
+#include <srs_protocol_sdp.hpp>
+#include <srs_utest_ai06.hpp>
+#include <srs_utest_ai07.hpp>
+#include <srs_utest_ai19.hpp>
+
+#include <algorithm>
+#include <set>
+#ifndef _WIN32
+#include <poll.h>
+#endif
+
+// Mock ISrsResourceManager implementation
+MockResourceManagerForBindSession::MockResourceManagerForBindSession()
+{
+    session_to_return_ = NULL;
+}
+
+MockResourceManagerForBindSession::~MockResourceManagerForBindSession()
+{
+}
+
+srs_error_t MockResourceManagerForBindSession::start()
+{
+    return srs_success;
+}
+
+bool MockResourceManagerForBindSession::empty()
+{
+    return true;
+}
+
+size_t MockResourceManagerForBindSession::size()
+{
+    return 0;
+}
+
+void MockResourceManagerForBindSession::add(ISrsResource *conn, bool *exists)
+{
+}
+
+void MockResourceManagerForBindSession::add_with_id(const std::string &id, ISrsResource *conn)
+{
+}
+
+void MockResourceManagerForBindSession::add_with_fast_id(uint64_t id, ISrsResource *conn)
+{
+}
+
+void MockResourceManagerForBindSession::add_with_name(const std::string & /*name*/, ISrsResource * /*conn*/)
+{
+}
+
+ISrsResource *MockResourceManagerForBindSession::at(int index)
+{
+    return NULL;
+}
+
+ISrsResource *MockResourceManagerForBindSession::find_by_id(std::string id)
+{
+    return NULL;
+}
+
+ISrsResource *MockResourceManagerForBindSession::find_by_fast_id(uint64_t id)
+{
+    return session_to_return_;
+}
+
+ISrsResource *MockResourceManagerForBindSession::find_by_name(std::string /*name*/)
+{
+    return NULL;
+}
+
+void MockResourceManagerForBindSession::remove(ISrsResource *c)
+{
+}
+
+void MockResourceManagerForBindSession::subscribe(ISrsDisposingHandler *h)
+{
+}
+
+void MockResourceManagerForBindSession::unsubscribe(ISrsDisposingHandler *h)
+{
+}
+
+void MockResourceManagerForBindSession::reset()
+{
+    session_to_return_ = NULL;
+}
+
+// Mock ISrsEphemeralDelta implementation
+MockEphemeralDelta::MockEphemeralDelta()
+{
+    in_bytes_ = 0;
+    out_bytes_ = 0;
+}
+
+MockEphemeralDelta::~MockEphemeralDelta()
+{
+}
+
+void MockEphemeralDelta::add_delta(int64_t in, int64_t out)
+{
+    in_bytes_ += in;
+    out_bytes_ += out;
+}
+
+void MockEphemeralDelta::remark(int64_t *in, int64_t *out)
+{
+    if (in)
+        *in = in_bytes_;
+    if (out)
+        *out = out_bytes_;
+    in_bytes_ = 0;
+    out_bytes_ = 0;
+}
+
+void MockEphemeralDelta::reset()
+{
+    in_bytes_ = 0;
+    out_bytes_ = 0;
+}
+
+// Mock ISrsUdpMuxSocket implementation
+MockUdpMuxSocket::MockUdpMuxSocket()
+{
+    sendto_error_ = srs_success;
+    sendto_called_count_ = 0;
+    last_sendto_size_ = 0;
+    peer_ip_ = "192.168.1.100";
+    peer_port_ = 5000;
+    peer_id_ = "192.168.1.100:5000";
+    fast_id_ = 0;
+    data_ = NULL;
+    size_ = 0;
+}
+
+MockUdpMuxSocket::~MockUdpMuxSocket()
+{
+    srs_freep(sendto_error_);
+    data_ = NULL;
+}
+
+srs_error_t MockUdpMuxSocket::sendto(void *data, int size, srs_utime_t timeout)
+{
+    sendto_called_count_++;
+    last_sendto_size_ = size;
+    return srs_error_copy(sendto_error_);
+}
+
+std::string MockUdpMuxSocket::get_peer_ip() const
+{
+    return peer_ip_;
+}
+
+int MockUdpMuxSocket::get_peer_port() const
+{
+    return peer_port_;
+}
+
+std::string MockUdpMuxSocket::peer_id()
+{
+    return peer_id_;
+}
+
+uint64_t MockUdpMuxSocket::fast_id()
+{
+    return fast_id_;
+}
+
+SrsUdpMuxSocket *MockUdpMuxSocket::copy_sendonly()
+{
+    // Return self for testing purposes - in real implementation this creates a copy
+    return (SrsUdpMuxSocket *)this;
+}
+
+int MockUdpMuxSocket::recvfrom(srs_utime_t timeout)
+{
+    // Mock implementation - return the size of data received
+    return size_;
+}
+
+char *MockUdpMuxSocket::data()
+{
+    // Mock implementation - return the data buffer
+    return data_;
+}
+
+int MockUdpMuxSocket::size()
+{
+    // Mock implementation - return the size of data
+    return size_;
+}
+
+void MockUdpMuxSocket::reset()
+{
+    srs_freep(sendto_error_);
+    sendto_called_count_ = 0;
+    last_sendto_size_ = 0;
+}
+
+void MockUdpMuxSocket::set_sendto_error(srs_error_t err)
+{
+    srs_freep(sendto_error_);
+    sendto_error_ = srs_error_copy(err);
+}
+
+// Mock DTLS implementation
+MockDtls::MockDtls()
+{
+    initialize_error_ = srs_success;
+    start_active_handshake_error_ = srs_success;
+    on_dtls_error_ = srs_success;
+    get_srtp_key_error_ = srs_success;
+
+    reset();
+}
+
+MockDtls::~MockDtls()
+{
+    srs_freep(initialize_error_);
+    srs_freep(start_active_handshake_error_);
+    srs_freep(on_dtls_error_);
+    srs_freep(get_srtp_key_error_);
+}
+
+void MockDtls::reset()
+{
+    srs_freep(initialize_error_);
+    srs_freep(start_active_handshake_error_);
+    srs_freep(on_dtls_error_);
+    srs_freep(get_srtp_key_error_);
+
+    initialize_error_ = srs_success;
+    start_active_handshake_error_ = srs_success;
+    on_dtls_error_ = srs_success;
+    get_srtp_key_error_ = srs_success;
+
+    last_role_ = "";
+    last_version_ = "";
+    recv_key_ = "";
+    send_key_ = "";
+    peer_fingerprint_ = "AA:BB:CC";
+    last_fingerprint_algo_ = "";
+
+    initialize_count_ = 0;
+    start_active_handshake_count_ = 0;
+    on_dtls_count_ = 0;
+    get_srtp_key_count_ = 0;
+    get_peer_fingerprint_count_ = 0;
+}
+
+srs_error_t MockDtls::initialize(std::string role, std::string version)
+{
+    initialize_count_++;
+    last_role_ = role;
+    last_version_ = version;
+    return srs_error_copy(initialize_error_);
+}
+
+srs_error_t MockDtls::start_active_handshake()
+{
+    start_active_handshake_count_++;
+    return srs_error_copy(start_active_handshake_error_);
+}
+
+srs_error_t MockDtls::on_dtls(char *data, int nb_data)
+{
+    on_dtls_count_++;
+    return srs_error_copy(on_dtls_error_);
+}
+
+srs_error_t MockDtls::get_srtp_key(std::string &recv_key, std::string &send_key)
+{
+    get_srtp_key_count_++;
+    if (get_srtp_key_error_ != srs_success) {
+        return srs_error_copy(get_srtp_key_error_);
+    }
+    recv_key = recv_key_;
+    send_key = send_key_;
+    return srs_success;
+}
+
+srs_error_t MockDtls::get_peer_fingerprint(std::string algo, std::string &fingerprint)
+{
+    get_peer_fingerprint_count_++;
+    last_fingerprint_algo_ = algo;
+    fingerprint = peer_fingerprint_;
+    return srs_success;
+}
+
+void MockDtls::set_initialize_error(srs_error_t err)
+{
+    srs_freep(initialize_error_);
+    initialize_error_ = srs_error_copy(err);
+}
+
+void MockDtls::set_start_active_handshake_error(srs_error_t err)
+{
+    srs_freep(start_active_handshake_error_);
+    start_active_handshake_error_ = srs_error_copy(err);
+}
+
+void MockDtls::set_on_dtls_error(srs_error_t err)
+{
+    srs_freep(on_dtls_error_);
+    on_dtls_error_ = srs_error_copy(err);
+}
+
+void MockDtls::set_get_srtp_key_error(srs_error_t err)
+{
+    srs_freep(get_srtp_key_error_);
+    get_srtp_key_error_ = srs_error_copy(err);
+}
+
+void MockDtls::set_srtp_keys(const std::string &recv_key, const std::string &send_key)
+{
+    recv_key_ = recv_key;
+    send_key_ = send_key;
+}
+
+// Mock RTC Network implementation
+MockRtcNetwork::MockRtcNetwork()
+{
+    on_dtls_handshake_done_error_ = srs_success;
+    on_dtls_alert_error_ = srs_success;
+    protect_rtp_error_ = srs_success;
+    protect_rtcp_error_ = srs_success;
+    write_error_ = srs_success;
+
+    reset();
+}
+
+MockRtcNetwork::~MockRtcNetwork()
+{
+    srs_freep(on_dtls_handshake_done_error_);
+    srs_freep(on_dtls_alert_error_);
+    srs_freep(protect_rtp_error_);
+    srs_freep(protect_rtcp_error_);
+    srs_freep(write_error_);
+}
+
+void MockRtcNetwork::reset()
+{
+    srs_freep(on_dtls_handshake_done_error_);
+    srs_freep(on_dtls_alert_error_);
+    srs_freep(protect_rtp_error_);
+    srs_freep(protect_rtcp_error_);
+    srs_freep(write_error_);
+
+    on_dtls_handshake_done_error_ = srs_success;
+    on_dtls_alert_error_ = srs_success;
+    protect_rtp_error_ = srs_success;
+    protect_rtcp_error_ = srs_success;
+    write_error_ = srs_success;
+
+    last_alert_type_ = "";
+    last_alert_desc_ = "";
+
+    on_dtls_handshake_done_count_ = 0;
+    on_dtls_alert_count_ = 0;
+    protect_rtp_count_ = 0;
+    protect_rtcp_count_ = 0;
+    write_count_ = 0;
+    packets_.clear();
+    is_established_ = true;
+}
+
+srs_error_t MockRtcNetwork::initialize(SrsSessionConfig *cfg, bool dtls, bool srtp)
+{
+    return srs_success;
+}
+
+void MockRtcNetwork::set_state(SrsRtcNetworkState state)
+{
+}
+
+srs_error_t MockRtcNetwork::on_dtls_handshake_done()
+{
+    on_dtls_handshake_done_count_++;
+    return srs_error_copy(on_dtls_handshake_done_error_);
+}
+
+srs_error_t MockRtcNetwork::on_dtls_alert(std::string type, std::string desc)
+{
+    on_dtls_alert_count_++;
+    last_alert_type_ = type;
+    last_alert_desc_ = desc;
+    return srs_error_copy(on_dtls_alert_error_);
+}
+
+srs_error_t MockRtcNetwork::on_dtls(char *data, int nb_data)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcNetwork::protect_rtp(void *packet, int *nb_cipher)
+{
+    protect_rtp_count_++;
+    return srs_error_copy(protect_rtp_error_);
+}
+
+srs_error_t MockRtcNetwork::protect_rtcp(void *packet, int *nb_cipher)
+{
+    protect_rtcp_count_++;
+    return srs_error_copy(protect_rtcp_error_);
+}
+
+srs_error_t MockRtcNetwork::on_stun(SrsStunPacket *r, char *data, int nb_data)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcNetwork::on_rtp(char *data, int nb_data)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcNetwork::on_rtcp(char *data, int nb_data)
+{
+    return srs_success;
+}
+
+bool MockRtcNetwork::is_establelished()
+{
+    return is_established_;
+}
+
+srs_error_t MockRtcNetwork::write(void *buf, size_t size, ssize_t *nwrite)
+{
+    write_count_++;
+    packets_.push_back(std::string((char *)buf, size));
+    if (nwrite) {
+        *nwrite = (ssize_t)size;
+    }
+    return srs_error_copy(write_error_);
+}
+
+void MockRtcNetwork::set_on_dtls_handshake_done_error(srs_error_t err)
+{
+    srs_freep(on_dtls_handshake_done_error_);
+    on_dtls_handshake_done_error_ = srs_error_copy(err);
+}
+
+void MockRtcNetwork::set_on_dtls_alert_error(srs_error_t err)
+{
+    srs_freep(on_dtls_alert_error_);
+    on_dtls_alert_error_ = srs_error_copy(err);
+}
+
+void MockRtcNetwork::set_protect_rtp_error(srs_error_t err)
+{
+    srs_freep(protect_rtp_error_);
+    protect_rtp_error_ = srs_error_copy(err);
+}
+
+void MockRtcNetwork::set_protect_rtcp_error(srs_error_t err)
+{
+    srs_freep(protect_rtcp_error_);
+    protect_rtcp_error_ = srs_error_copy(err);
+}
+
+void MockRtcNetwork::set_write_error(srs_error_t err)
+{
+    srs_freep(write_error_);
+    write_error_ = srs_error_copy(err);
+}
+
+void MockRtcNetwork::set_established(bool established)
+{
+    is_established_ = established;
+}
+
+// Mock SRTP implementation
+MockSrtp::MockSrtp()
+{
+    initialize_error_ = srs_success;
+    protect_rtp_error_ = srs_success;
+    protect_rtcp_error_ = srs_success;
+    unprotect_rtp_error_ = srs_success;
+    unprotect_rtcp_error_ = srs_success;
+
+    reset();
+}
+
+MockSrtp::~MockSrtp()
+{
+    srs_freep(initialize_error_);
+    srs_freep(protect_rtp_error_);
+    srs_freep(protect_rtcp_error_);
+    srs_freep(unprotect_rtp_error_);
+    srs_freep(unprotect_rtcp_error_);
+}
+
+void MockSrtp::reset()
+{
+    srs_freep(initialize_error_);
+    srs_freep(protect_rtp_error_);
+    srs_freep(protect_rtcp_error_);
+    srs_freep(unprotect_rtp_error_);
+    srs_freep(unprotect_rtcp_error_);
+
+    initialize_error_ = srs_success;
+    protect_rtp_error_ = srs_success;
+    protect_rtcp_error_ = srs_success;
+    unprotect_rtp_error_ = srs_success;
+    unprotect_rtcp_error_ = srs_success;
+
+    last_recv_key_ = "";
+    last_send_key_ = "";
+
+    initialize_count_ = 0;
+    protect_rtp_count_ = 0;
+    protect_rtcp_count_ = 0;
+    unprotect_rtp_count_ = 0;
+    unprotect_rtcp_count_ = 0;
+}
+
+srs_error_t MockSrtp::initialize(std::string recv_key, std::string send_key)
+{
+    initialize_count_++;
+    last_recv_key_ = recv_key;
+    last_send_key_ = send_key;
+    return srs_error_copy(initialize_error_);
+}
+
+srs_error_t MockSrtp::protect_rtp(void *packet, int *nb_cipher)
+{
+    protect_rtp_count_++;
+    return srs_error_copy(protect_rtp_error_);
+}
+
+srs_error_t MockSrtp::protect_rtcp(void *packet, int *nb_cipher)
+{
+    protect_rtcp_count_++;
+    return srs_error_copy(protect_rtcp_error_);
+}
+
+srs_error_t MockSrtp::unprotect_rtp(void *packet, int *nb_plaintext)
+{
+    unprotect_rtp_count_++;
+    return srs_error_copy(unprotect_rtp_error_);
+}
+
+srs_error_t MockSrtp::unprotect_rtcp(void *packet, int *nb_plaintext)
+{
+    unprotect_rtcp_count_++;
+    return srs_error_copy(unprotect_rtcp_error_);
+}
+
+void MockSrtp::set_initialize_error(srs_error_t err)
+{
+    srs_freep(initialize_error_);
+    initialize_error_ = srs_error_copy(err);
+}
+
+void MockSrtp::set_protect_rtp_error(srs_error_t err)
+{
+    srs_freep(protect_rtp_error_);
+    protect_rtp_error_ = srs_error_copy(err);
+}
+
+void MockSrtp::set_protect_rtcp_error(srs_error_t err)
+{
+    srs_freep(protect_rtcp_error_);
+    protect_rtcp_error_ = srs_error_copy(err);
+}
+
+void MockSrtp::set_unprotect_rtp_error(srs_error_t err)
+{
+    srs_freep(unprotect_rtp_error_);
+    unprotect_rtp_error_ = srs_error_copy(err);
+}
+
+void MockSrtp::set_unprotect_rtcp_error(srs_error_t err)
+{
+    srs_freep(unprotect_rtcp_error_);
+    unprotect_rtcp_error_ = srs_error_copy(err);
+}
+
+// Custom SrsSecurityTransport for testing that allows injecting mock DTLS and SRTP
+class TestableSecurityTransport : public SrsSecurityTransport
+{
+public:
+    TestableSecurityTransport(ISrsRtcNetwork *s, MockDtls *mock_dtls, MockSrtp *mock_srtp = NULL) : SrsSecurityTransport(s)
+    {
+        // Replace the real DTLS with our mock
+        srs_freep(dtls_);
+        dtls_ = mock_dtls;
+        remote_fingerprint_algo_ = "sha-256";
+        remote_fingerprint_ = mock_dtls->peer_fingerprint_;
+
+        // Replace the real SRTP with our mock if provided
+        if (mock_srtp) {
+            srs_freep(srtp_);
+            srtp_ = mock_srtp;
+        }
+    }
+
+    virtual ~TestableSecurityTransport()
+    {
+        // Don't free the mock DTLS and SRTP, they're managed by the test
+        dtls_ = NULL;
+        srtp_ = NULL;
+    }
+};
+
+VOID TEST(SecurityTransportTest, InitializeSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+
+    // Verify DTLS initialize was called with correct parameters
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+    EXPECT_STREQ("active", mock_dtls.last_role_.c_str());
+    EXPECT_STREQ("1.2", mock_dtls.last_version_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, InitializeFailure)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock dtls initialize error");
+    mock_dtls.set_initialize_error(mock_error);
+    srs_freep(mock_error);
+
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "passive";
+    cfg->dtls_version_ = "auto";
+
+    HELPER_EXPECT_FAILED(transport->initialize(cfg.get()));
+
+    // Verify DTLS initialize was called with correct parameters
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+    EXPECT_STREQ("passive", mock_dtls.last_role_.c_str());
+    EXPECT_STREQ("auto", mock_dtls.last_version_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, StartActiveHandshakeSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+
+    // Verify DTLS start_active_handshake was called
+    EXPECT_EQ(1, mock_dtls.start_active_handshake_count_);
+}
+
+VOID TEST(SecurityTransportTest, StartActiveHandshakeFailure)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock dtls handshake error");
+    mock_dtls.set_start_active_handshake_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->start_active_handshake());
+
+    // Verify DTLS start_active_handshake was called
+    EXPECT_EQ(1, mock_dtls.start_active_handshake_count_);
+}
+
+VOID TEST(SecurityTransportTest, InitializeWithDifferentRoles)
+{
+    srs_error_t err;
+
+    // Test with active role
+    if (true) {
+        MockRtcNetwork mock_network;
+        MockDtls mock_dtls;
+        SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+        SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+        cfg->dtls_role_ = "active";
+        cfg->dtls_version_ = "1.2";
+
+        HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+        EXPECT_STREQ("active", mock_dtls.last_role_.c_str());
+        EXPECT_STREQ("1.2", mock_dtls.last_version_.c_str());
+    }
+
+    // Test with passive role
+    if (true) {
+        MockRtcNetwork mock_network;
+        MockDtls mock_dtls;
+        SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+        SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+        cfg->dtls_role_ = "passive";
+        cfg->dtls_version_ = "auto";
+
+        HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+        EXPECT_STREQ("passive", mock_dtls.last_role_.c_str());
+        EXPECT_STREQ("auto", mock_dtls.last_version_.c_str());
+    }
+}
+
+VOID TEST(SecurityTransportTest, InitializeWithEmptyRoleAndVersion)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "";
+    cfg->dtls_version_ = "";
+
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+
+    // Verify DTLS initialize was called with empty parameters
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+    EXPECT_STREQ("", mock_dtls.last_role_.c_str());
+    EXPECT_STREQ("", mock_dtls.last_version_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, MultipleInitializeCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    // First initialize call
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+
+    // Second initialize call
+    cfg->dtls_role_ = "passive";
+    cfg->dtls_version_ = "auto";
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+    EXPECT_EQ(2, mock_dtls.initialize_count_);
+    EXPECT_STREQ("passive", mock_dtls.last_role_.c_str());
+    EXPECT_STREQ("auto", mock_dtls.last_version_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, MultipleHandshakeCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // First handshake call
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(1, mock_dtls.start_active_handshake_count_);
+
+    // Second handshake call
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(2, mock_dtls.start_active_handshake_count_);
+}
+
+VOID TEST(SecurityTransportTest, InitializeAndHandshakeSequence)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Initialize first
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+    EXPECT_EQ(0, mock_dtls.start_active_handshake_count_);
+
+    // Then start handshake
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(1, mock_dtls.initialize_count_);
+    EXPECT_EQ(1, mock_dtls.start_active_handshake_count_);
+}
+
+VOID TEST(SecurityTransportTest, HandshakeWithoutInitialize)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Try handshake without initialize - should still work as DTLS handles it
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(0, mock_dtls.initialize_count_);
+    EXPECT_EQ(1, mock_dtls.start_active_handshake_count_);
+}
+
+VOID TEST(SecurityTransportTest, WriteDtlsDataSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    char test_data[] = "test dtls data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, data_size));
+
+    // Verify network write was called
+    EXPECT_EQ(1, mock_network.write_count_);
+}
+
+VOID TEST(SecurityTransportTest, WriteDtlsDataZeroSize)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    char test_data[] = "test dtls data";
+
+    // Write with zero size should return success without calling network write
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, 0));
+
+    // Verify network write was NOT called
+    EXPECT_EQ(0, mock_network.write_count_);
+}
+
+VOID TEST(SecurityTransportTest, WriteDtlsDataNetworkError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock to return error
+    srs_error_t mock_error = srs_error_new(ERROR_SOCKET_WRITE, "mock network write error");
+    mock_network.set_write_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_data[] = "test dtls data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_FAILED(transport->write_dtls_data(test_data, data_size));
+
+    // Verify network write was called
+    EXPECT_EQ(1, mock_network.write_count_);
+}
+
+MockRtcBlackholeForSecurityTransport::MockRtcBlackholeForSecurityTransport()
+{
+    sendto_count_ = 0;
+    last_data_ = NULL;
+    last_len_ = 0;
+}
+
+MockRtcBlackholeForSecurityTransport::~MockRtcBlackholeForSecurityTransport()
+{
+}
+
+srs_error_t MockRtcBlackholeForSecurityTransport::initialize()
+{
+    return srs_success;
+}
+
+void MockRtcBlackholeForSecurityTransport::sendto(void *data, int len)
+{
+    sendto_count_++;
+    last_data_ = data;
+    last_len_ = len;
+}
+
+// Both security transports capture the black hole at construction, so a test can replace it before any DTLS packet
+// is written.
+VOID TEST(SecurityTransportTest, ConstructionCapturesBlackhole)
+{
+    MockRtcNetwork mock_network;
+
+    SrsSecurityTransport transport(&mock_network);
+    EXPECT_TRUE(transport.blackhole_ != NULL);
+    EXPECT_EQ((ISrsRtcBlackhole *)_srs_blackhole, transport.blackhole_);
+
+    SrsSemiSecurityTransport semi(&mock_network);
+    EXPECT_TRUE(semi.blackhole_ != NULL);
+    EXPECT_EQ((ISrsRtcBlackhole *)_srs_blackhole, semi.blackhole_);
+}
+
+// A DTLS packet goes to the black hole with its own pointer and size, after it was written to the network.
+VOID TEST(SecurityTransportTest, WriteDtlsDataWritesToInjectedBlackhole)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockRtcBlackholeForSecurityTransport blackhole;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+    transport->blackhole_ = &blackhole;
+
+    char test_data[] = "test dtls data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, data_size));
+
+    EXPECT_EQ(1, mock_network.write_count_);
+    EXPECT_EQ(1, blackhole.sendto_count_);
+    EXPECT_EQ((void *)test_data, blackhole.last_data_);
+    EXPECT_EQ(data_size, blackhole.last_len_);
+
+    transport->blackhole_ = NULL;
+}
+
+// An empty DTLS packet, or one the network failed to write, never reaches the black hole.
+VOID TEST(SecurityTransportTest, WriteDtlsDataSkipsBlackholeWhenNotSent)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockRtcBlackholeForSecurityTransport blackhole;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+    transport->blackhole_ = &blackhole;
+
+    char test_data[] = "test dtls data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, 0));
+    EXPECT_EQ(0, mock_network.write_count_);
+    EXPECT_EQ(0, blackhole.sendto_count_);
+
+    srs_error_t mock_error = srs_error_new(ERROR_SOCKET_WRITE, "mock network write error");
+    mock_network.set_write_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->write_dtls_data(test_data, data_size));
+    EXPECT_EQ(1, mock_network.write_count_);
+    EXPECT_EQ(0, blackhole.sendto_count_);
+
+    transport->blackhole_ = NULL;
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    char test_data[] = "dtls handshake data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_SUCCESS(transport->on_dtls(test_data, data_size));
+
+    // Verify DTLS on_dtls was called
+    EXPECT_EQ(1, mock_dtls.on_dtls_count_);
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock dtls processing error");
+    mock_dtls.set_on_dtls_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_data[] = "dtls handshake data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_FAILED(transport->on_dtls(test_data, data_size));
+
+    // Verify DTLS on_dtls was called
+    EXPECT_EQ(1, mock_dtls.on_dtls_count_);
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsAlertSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    std::string alert_type = "warning";
+    std::string alert_desc = "close_notify";
+
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_alert(alert_type, alert_desc));
+
+    // Verify network on_dtls_alert was called with correct parameters
+    EXPECT_EQ(1, mock_network.on_dtls_alert_count_);
+    EXPECT_STREQ("warning", mock_network.last_alert_type_.c_str());
+    EXPECT_STREQ("close_notify", mock_network.last_alert_desc_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsAlertError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock dtls alert error");
+    mock_network.set_on_dtls_alert_error(mock_error);
+    srs_freep(mock_error);
+
+    std::string alert_type = "fatal";
+    std::string alert_desc = "handshake_failure";
+
+    HELPER_EXPECT_FAILED(transport->on_dtls_alert(alert_type, alert_desc));
+
+    // Verify network on_dtls_alert was called with correct parameters
+    EXPECT_EQ(1, mock_network.on_dtls_alert_count_);
+    EXPECT_STREQ("fatal", mock_network.last_alert_type_.c_str());
+    EXPECT_STREQ("handshake_failure", mock_network.last_alert_desc_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsHandshakeDoneSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock DTLS to return valid SRTP keys (30 bytes each: 16 key + 14 salt)
+    std::string recv_key(30, 'r'); // 30 bytes of 'r'
+    std::string send_key(30, 's'); // 30 bytes of 's'
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_handshake_done());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsHandshakeDoneAlreadyDone)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock DTLS to return valid SRTP keys (30 bytes each: 16 key + 14 salt)
+    std::string recv_key(30, 'r'); // 30 bytes of 'r'
+    std::string send_key(30, 's'); // 30 bytes of 's'
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    // First call should succeed
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_handshake_done());
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+
+    // Second call should return success immediately without calling DTLS/network
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_handshake_done());
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);              // Should not increase
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_); // Should not increase
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsHandshakeDoneSrtpInitError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock DTLS to return error when getting SRTP keys
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_INIT, "mock srtp key error");
+    mock_dtls.set_get_srtp_key_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->on_dtls_handshake_done());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify network on_dtls_handshake_done was NOT called due to SRTP init failure
+    EXPECT_EQ(0, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsHandshakeDoneNetworkError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    // Set up mock DTLS to return valid SRTP keys (30 bytes each: 16 key + 14 salt)
+    std::string recv_key(30, 'r'); // 30 bytes of 'r'
+    std::string send_key(30, 's'); // 30 bytes of 's'
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    // Set up mock network to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock network handshake done error");
+    mock_network.set_on_dtls_handshake_done_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->on_dtls_handshake_done());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(SecurityTransportTest, OnDtlsApplicationDataSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls));
+
+    char test_data[] = "application data";
+    int data_size = strlen(test_data);
+
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_application_data(test_data, data_size));
+
+    // This method currently just returns success without doing anything
+    // TODO: When SCTP protocol support is added, this test should verify SCTP processing
+}
+
+VOID TEST(SecurityTransportTest, SrtpInitializeSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock DTLS to return valid SRTP keys (30 bytes each: 16 key + 14 salt)
+    std::string recv_key(30, 'r'); // 30 bytes of 'r'
+    std::string send_key(30, 's'); // 30 bytes of 's'
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    HELPER_EXPECT_SUCCESS(transport->srtp_initialize());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify SRTP initialize was called with correct keys
+    EXPECT_EQ(1, mock_srtp.initialize_count_);
+    EXPECT_STREQ(recv_key.c_str(), mock_srtp.last_recv_key_.c_str());
+    EXPECT_STREQ(send_key.c_str(), mock_srtp.last_send_key_.c_str());
+}
+
+VOID TEST(SecurityTransportTest, SrtpInitializeDtlsKeyError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock DTLS to return error when getting SRTP keys
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_INIT, "mock dtls get srtp key error");
+    mock_dtls.set_get_srtp_key_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->srtp_initialize());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify SRTP initialize was NOT called due to DTLS error
+    EXPECT_EQ(0, mock_srtp.initialize_count_);
+}
+
+VOID TEST(SecurityTransportTest, SrtpInitializeSrtpError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock DTLS to return valid SRTP keys
+    std::string recv_key(30, 'r');
+    std::string send_key(30, 's');
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    // Set up mock SRTP to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_INIT, "mock srtp initialize error");
+    mock_srtp.set_initialize_error(mock_error);
+    srs_freep(mock_error);
+
+    HELPER_EXPECT_FAILED(transport->srtp_initialize());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify SRTP initialize was called
+    EXPECT_EQ(1, mock_srtp.initialize_count_);
+}
+
+VOID TEST(SecurityTransportTest, ProtectRtpSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+
+    // Verify SRTP protect_rtp was called
+    EXPECT_EQ(1, mock_srtp.protect_rtp_count_);
+}
+
+VOID TEST(SecurityTransportTest, ProtectRtpError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock SRTP to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_PROTECT, "mock srtp protect rtp error");
+    mock_srtp.set_protect_rtp_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    HELPER_EXPECT_FAILED(transport->protect_rtp(test_packet, &nb_cipher));
+
+    // Verify SRTP protect_rtp was called
+    EXPECT_EQ(1, mock_srtp.protect_rtp_count_);
+}
+
+VOID TEST(SecurityTransportTest, ProtectRtcpSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+
+    // Verify SRTP protect_rtcp was called
+    EXPECT_EQ(1, mock_srtp.protect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, ProtectRtcpError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock SRTP to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_PROTECT, "mock srtp protect rtcp error");
+    mock_srtp.set_protect_rtcp_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    HELPER_EXPECT_FAILED(transport->protect_rtcp(test_packet, &nb_cipher));
+
+    // Verify SRTP protect_rtcp was called
+    EXPECT_EQ(1, mock_srtp.protect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, UnprotectRtpSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+
+    // Verify SRTP unprotect_rtp was called
+    EXPECT_EQ(1, mock_srtp.unprotect_rtp_count_);
+}
+
+VOID TEST(SecurityTransportTest, UnprotectRtpError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock SRTP to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_UNPROTECT, "mock srtp unprotect rtp error");
+    mock_srtp.set_unprotect_rtp_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    HELPER_EXPECT_FAILED(transport->unprotect_rtp(test_packet, &nb_plaintext));
+
+    // Verify SRTP unprotect_rtp was called
+    EXPECT_EQ(1, mock_srtp.unprotect_rtp_count_);
+}
+
+VOID TEST(SecurityTransportTest, UnprotectRtcpSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+
+    // Verify SRTP unprotect_rtcp was called
+    EXPECT_EQ(1, mock_srtp.unprotect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, UnprotectRtcpError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock SRTP to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_SRTP_UNPROTECT, "mock srtp unprotect rtcp error");
+    mock_srtp.set_unprotect_rtcp_error(mock_error);
+    srs_freep(mock_error);
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    HELPER_EXPECT_FAILED(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+
+    // Verify SRTP unprotect_rtcp was called
+    EXPECT_EQ(1, mock_srtp.unprotect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, ProtectUnprotectWithNullPointers)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    int nb_cipher = 100;
+    int nb_plaintext = 100;
+
+    // Test with NULL packet pointer - should still call SRTP methods
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(NULL, &nb_cipher));
+    EXPECT_EQ(1, mock_srtp.protect_rtp_count_);
+
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(NULL, &nb_cipher));
+    EXPECT_EQ(1, mock_srtp.protect_rtcp_count_);
+
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(NULL, &nb_plaintext));
+    EXPECT_EQ(1, mock_srtp.unprotect_rtp_count_);
+
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(NULL, &nb_plaintext));
+    EXPECT_EQ(1, mock_srtp.unprotect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, MultipleProtectUnprotectCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+    int nb_plaintext = sizeof(test_packet);
+
+    // Multiple protect_rtp calls
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+    EXPECT_EQ(2, mock_srtp.protect_rtp_count_);
+
+    // Multiple protect_rtcp calls
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+    EXPECT_EQ(2, mock_srtp.protect_rtcp_count_);
+
+    // Multiple unprotect_rtp calls
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+    EXPECT_EQ(2, mock_srtp.unprotect_rtp_count_);
+
+    // Multiple unprotect_rtcp calls
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+    EXPECT_EQ(2, mock_srtp.unprotect_rtcp_count_);
+}
+
+VOID TEST(SecurityTransportTest, SrtpInitializeWithEmptyKeys)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    MockDtls mock_dtls;
+    MockSrtp mock_srtp;
+    SrsUniquePtr<TestableSecurityTransport> transport(new TestableSecurityTransport(&mock_network, &mock_dtls, &mock_srtp));
+
+    // Set up mock DTLS to return empty SRTP keys
+    std::string recv_key = "";
+    std::string send_key = "";
+    mock_dtls.set_srtp_keys(recv_key, send_key);
+
+    HELPER_EXPECT_SUCCESS(transport->srtp_initialize());
+
+    // Verify DTLS get_srtp_key was called
+    EXPECT_EQ(1, mock_dtls.get_srtp_key_count_);
+    // Verify SRTP initialize was called with empty keys
+    EXPECT_EQ(1, mock_srtp.initialize_count_);
+    EXPECT_STREQ("", mock_srtp.last_recv_key_.c_str());
+    EXPECT_STREQ("", mock_srtp.last_send_key_.c_str());
+}
+
+// Tests for SrsSemiSecurityTransport
+VOID TEST(SemiSecurityTransportTest, ConstructorAndDestructor)
+{
+    MockRtcNetwork mock_network;
+    SrsSemiSecurityTransport *transport = new SrsSemiSecurityTransport(&mock_network);
+
+    // Constructor should succeed
+    EXPECT_TRUE(transport != NULL);
+
+    // Destructor should not crash
+    srs_freep(transport);
+}
+
+VOID TEST(SemiSecurityTransportTest, ProtectRtpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    // protect_rtp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(NULL, &nb_cipher));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(NULL, NULL));
+}
+
+VOID TEST(SemiSecurityTransportTest, ProtectRtcpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    // protect_rtcp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(NULL, &nb_cipher));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(NULL, NULL));
+}
+
+VOID TEST(SemiSecurityTransportTest, UnprotectRtpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    // unprotect_rtp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(NULL, &nb_plaintext));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(NULL, NULL));
+}
+
+VOID TEST(SemiSecurityTransportTest, UnprotectRtcpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    // unprotect_rtcp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(NULL, &nb_plaintext));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(NULL, NULL));
+}
+
+VOID TEST(SemiSecurityTransportTest, MultipleProtectUnprotectCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+    int nb_plaintext = sizeof(test_packet);
+
+    // Multiple calls should all succeed
+    for (int i = 0; i < 5; i++) {
+        HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+        HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+        HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+        HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+    }
+}
+
+VOID TEST(SemiSecurityTransportTest, InheritedMethodsFromSecurityTransport)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsSemiSecurityTransport> transport(new SrsSemiSecurityTransport(&mock_network));
+
+    // Test inherited initialize method
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    // This should work since it inherits from SrsSecurityTransport
+    // Note: This will use real DTLS, so we expect it to work
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+}
+
+// Tests for SrsPlaintextTransport
+VOID TEST(PlaintextTransportTest, ConstructorAndDestructor)
+{
+    MockRtcNetwork mock_network;
+    SrsPlaintextTransport *transport = new SrsPlaintextTransport(&mock_network);
+
+    // Constructor should succeed
+    EXPECT_TRUE(transport != NULL);
+
+    // Destructor should not crash
+    srs_freep(transport);
+}
+
+VOID TEST(PlaintextTransportTest, InitializeAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // initialize should always return success without doing anything
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+
+    // Test with different config values
+    cfg->dtls_role_ = "passive";
+    cfg->dtls_version_ = "auto";
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+
+    // Test with empty config values
+    cfg->dtls_role_ = "";
+    cfg->dtls_version_ = "";
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+
+    // Test with NULL config
+    HELPER_EXPECT_SUCCESS(transport->initialize(NULL));
+}
+
+VOID TEST(PlaintextTransportTest, StartActiveHandshakeCallsNetworkHandshakeDone)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // start_active_handshake should call network->on_dtls_handshake_done()
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, StartActiveHandshakeNetworkError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // Set up mock network to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock network handshake done error");
+    mock_network.set_on_dtls_handshake_done_error(mock_error);
+    srs_freep(mock_error);
+
+    // start_active_handshake should propagate the network error
+    HELPER_EXPECT_FAILED(transport->start_active_handshake());
+
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, OnDtlsAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_data[] = "dtls handshake data";
+    int data_size = strlen(test_data);
+
+    // on_dtls should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->on_dtls(test_data, data_size));
+
+    // Test with NULL data
+    HELPER_EXPECT_SUCCESS(transport->on_dtls(NULL, data_size));
+
+    // Test with zero size
+    HELPER_EXPECT_SUCCESS(transport->on_dtls(test_data, 0));
+
+    // Test with both NULL and zero
+    HELPER_EXPECT_SUCCESS(transport->on_dtls(NULL, 0));
+}
+
+VOID TEST(PlaintextTransportTest, OnDtlsAlertAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // on_dtls_alert should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_alert("warning", "close_notify"));
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_alert("fatal", "handshake_failure"));
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_alert("", ""));
+}
+
+VOID TEST(PlaintextTransportTest, OnDtlsHandshakeDoneCallsNetwork)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // on_dtls_handshake_done should call network->on_dtls_handshake_done()
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_handshake_done());
+
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, OnDtlsHandshakeDoneNetworkError)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // Set up mock network to return error
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_DTLS, "mock network handshake done error");
+    mock_network.set_on_dtls_handshake_done_error(mock_error);
+    srs_freep(mock_error);
+
+    // on_dtls_handshake_done should propagate the network error
+    HELPER_EXPECT_FAILED(transport->on_dtls_handshake_done());
+
+    // Verify network on_dtls_handshake_done was called
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, OnDtlsApplicationDataAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_data[] = "application data";
+    int data_size = strlen(test_data);
+
+    // on_dtls_application_data should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_application_data(test_data, data_size));
+
+    // Test with NULL data
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_application_data(NULL, data_size));
+
+    // Test with zero size
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_application_data(test_data, 0));
+
+    // Test with both NULL and zero
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_application_data(NULL, 0));
+}
+
+VOID TEST(PlaintextTransportTest, WriteDtlsDataAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_data[] = "dtls data to write";
+    int data_size = strlen(test_data);
+
+    // write_dtls_data should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, data_size));
+
+    // Test with NULL data
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(NULL, data_size));
+
+    // Test with zero size
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(test_data, 0));
+
+    // Test with both NULL and zero
+    HELPER_EXPECT_SUCCESS(transport->write_dtls_data(NULL, 0));
+}
+
+VOID TEST(PlaintextTransportTest, ProtectRtpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    // protect_rtp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(NULL, &nb_cipher));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->protect_rtp(NULL, NULL));
+}
+
+VOID TEST(PlaintextTransportTest, ProtectRtcpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+
+    // protect_rtcp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(NULL, &nb_cipher));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->protect_rtcp(NULL, NULL));
+}
+
+VOID TEST(PlaintextTransportTest, UnprotectRtpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    // unprotect_rtp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(NULL, &nb_plaintext));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(NULL, NULL));
+}
+
+VOID TEST(PlaintextTransportTest, UnprotectRtcpAlwaysSuccess)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_plaintext = sizeof(test_packet);
+
+    // unprotect_rtcp should always return success without doing anything
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+
+    // Test with NULL packet
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(NULL, &nb_plaintext));
+
+    // Test with NULL size pointer
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, NULL));
+
+    // Test with both NULL
+    HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(NULL, NULL));
+}
+
+VOID TEST(PlaintextTransportTest, MultipleProtectUnprotectCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    char test_packet[100] = {0};
+    int nb_cipher = sizeof(test_packet);
+    int nb_plaintext = sizeof(test_packet);
+
+    // Multiple calls should all succeed
+    for (int i = 0; i < 5; i++) {
+        HELPER_EXPECT_SUCCESS(transport->protect_rtp(test_packet, &nb_cipher));
+        HELPER_EXPECT_SUCCESS(transport->protect_rtcp(test_packet, &nb_cipher));
+        HELPER_EXPECT_SUCCESS(transport->unprotect_rtp(test_packet, &nb_plaintext));
+        HELPER_EXPECT_SUCCESS(transport->unprotect_rtcp(test_packet, &nb_plaintext));
+    }
+}
+
+VOID TEST(RtcPublishStreamTest, SendRtcpXrRrtr)
+{
+    srs_error_t err;
+
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, SrsContextId()));
+
+    // Create audio track
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio_track_1";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+    SrsRtcAudioRecvTrack *audio_track = new SrsRtcAudioRecvTrack(&mock_receiver, audio_desc, false);
+    publish_stream->audio_tracks_.push_back(audio_track);
+
+    // Create video track
+    SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+    video_desc->type_ = "video";
+    video_desc->id_ = "video_track_1";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+    SrsRtcVideoRecvTrack *video_track = new SrsRtcVideoRecvTrack(&mock_receiver, video_desc, false);
+    publish_stream->video_tracks_.push_back(video_track);
+
+    // Test successful case
+    HELPER_EXPECT_SUCCESS(publish_stream->send_rtcp_xr_rrtr());
+
+    // Verify that send_rtcp_xr_rrtr was called for both tracks (2 times total)
+    EXPECT_EQ(2, mock_receiver.send_rtcp_xr_rrtr_count_);
+}
+
+// Mock RTC expire implementation
+MockRtcExpire::MockRtcExpire()
+{
+    expired_ = false;
+}
+
+MockRtcExpire::~MockRtcExpire()
+{
+}
+
+void MockRtcExpire::expire()
+{
+    expired_ = true;
+}
+
+void MockRtcExpire::reset()
+{
+    expired_ = false;
+}
+
+VOID TEST(RtcPublishStreamTest, SendRtcpRrSuccess)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsContextId cid;
+
+    // Create publish stream
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Create mock track descriptions
+    SrsUniquePtr<SrsRtcTrackDescription> video_track_desc(new SrsRtcTrackDescription());
+    video_track_desc->type_ = "video";
+    video_track_desc->id_ = "video_track_1";
+    video_track_desc->ssrc_ = 12345;
+
+    SrsUniquePtr<SrsRtcTrackDescription> audio_track_desc(new SrsRtcTrackDescription());
+    audio_track_desc->type_ = "audio";
+    audio_track_desc->id_ = "audio_track_1";
+    audio_track_desc->ssrc_ = 67890;
+
+    // Create video and audio recv tracks
+    SrsRtcVideoRecvTrack *video_track = new SrsRtcVideoRecvTrack(&mock_receiver, video_track_desc.get(), false);
+    SrsRtcAudioRecvTrack *audio_track = new SrsRtcAudioRecvTrack(&mock_receiver, audio_track_desc.get(), false);
+
+    // Add tracks to publish stream (using private member access)
+    // The publish stream will take ownership and free them in destructor
+    publish_stream->video_tracks_.push_back(video_track);
+    publish_stream->audio_tracks_.push_back(audio_track);
+
+    // Test send_rtcp_rr - should succeed when all tracks succeed
+    HELPER_EXPECT_SUCCESS(publish_stream->send_rtcp_rr());
+
+    // Verify that send_rtcp_rr was called on both tracks (2 calls total)
+    EXPECT_EQ(2, mock_receiver.send_rtcp_rr_count_);
+}
+
+VOID TEST(RtcPublishStreamTest, SendRtcpRrVideoTrackError)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsContextId cid;
+
+    // Create publish stream
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Create mock track descriptions
+    SrsUniquePtr<SrsRtcTrackDescription> video_track_desc(new SrsRtcTrackDescription());
+    video_track_desc->type_ = "video";
+    video_track_desc->id_ = "video_track_1";
+    video_track_desc->ssrc_ = 12345;
+
+    // Create video recv track
+    SrsRtcVideoRecvTrack *video_track = new SrsRtcVideoRecvTrack(&mock_receiver, video_track_desc.get(), false);
+
+    // Add track to publish stream (only video track to simplify)
+    publish_stream->video_tracks_.push_back(video_track);
+
+    // Set receiver to return error after reset
+    srs_error_t mock_error = srs_error_new(ERROR_RTC_RTCP, "mock rtcp rr error");
+    mock_receiver.set_send_rtcp_rr_error(mock_error);
+
+    // Test send_rtcp_rr - should fail when receiver returns error
+    HELPER_EXPECT_FAILED(publish_stream->send_rtcp_rr());
+
+    // Verify that send_rtcp_rr was called once
+    EXPECT_EQ(1, mock_receiver.send_rtcp_rr_count_);
+}
+
+VOID TEST(RtcPublishStreamTest, SendRtcpRrNoTracks)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsContextId cid;
+
+    // Create publish stream
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Test send_rtcp_rr with no tracks - should succeed (empty loops)
+    HELPER_EXPECT_SUCCESS(publish_stream->send_rtcp_rr());
+}
+
+VOID TEST(RtcPublishStreamTest, SendRtcpRrMultipleTracks)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsContextId cid;
+
+    // Create publish stream
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Create multiple video track descriptions
+    SrsUniquePtr<SrsRtcTrackDescription> video_track_desc1(new SrsRtcTrackDescription());
+    video_track_desc1->type_ = "video";
+    video_track_desc1->id_ = "video_track_1";
+    video_track_desc1->ssrc_ = 12345;
+
+    SrsUniquePtr<SrsRtcTrackDescription> video_track_desc2(new SrsRtcTrackDescription());
+    video_track_desc2->type_ = "video";
+    video_track_desc2->id_ = "video_track_2";
+    video_track_desc2->ssrc_ = 12346;
+
+    // Create multiple audio track descriptions
+    SrsUniquePtr<SrsRtcTrackDescription> audio_track_desc1(new SrsRtcTrackDescription());
+    audio_track_desc1->type_ = "audio";
+    audio_track_desc1->id_ = "audio_track_1";
+    audio_track_desc1->ssrc_ = 67890;
+
+    SrsUniquePtr<SrsRtcTrackDescription> audio_track_desc2(new SrsRtcTrackDescription());
+    audio_track_desc2->type_ = "audio";
+    audio_track_desc2->id_ = "audio_track_2";
+    audio_track_desc2->ssrc_ = 67891;
+
+    // Create tracks
+    SrsRtcVideoRecvTrack *video_track1 = new SrsRtcVideoRecvTrack(&mock_receiver, video_track_desc1.get(), false);
+    SrsRtcVideoRecvTrack *video_track2 = new SrsRtcVideoRecvTrack(&mock_receiver, video_track_desc2.get(), false);
+    SrsRtcAudioRecvTrack *audio_track1 = new SrsRtcAudioRecvTrack(&mock_receiver, audio_track_desc1.get(), false);
+    SrsRtcAudioRecvTrack *audio_track2 = new SrsRtcAudioRecvTrack(&mock_receiver, audio_track_desc2.get(), false);
+
+    // Add tracks to publish stream
+    publish_stream->video_tracks_.push_back(video_track1);
+    publish_stream->video_tracks_.push_back(video_track2);
+    publish_stream->audio_tracks_.push_back(audio_track1);
+    publish_stream->audio_tracks_.push_back(audio_track2);
+
+    // Test send_rtcp_rr - should succeed when all tracks succeed
+    HELPER_EXPECT_SUCCESS(publish_stream->send_rtcp_rr());
+
+    // Verify that send_rtcp_rr was called on all tracks (4 calls total)
+    EXPECT_EQ(4, mock_receiver.send_rtcp_rr_count_);
+}
+
+VOID TEST(PlaintextTransportTest, MultipleHandshakeCalls)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // Multiple handshake calls should all succeed and call network each time
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(2, mock_network.on_dtls_handshake_done_count_);
+
+    HELPER_EXPECT_SUCCESS(transport->on_dtls_handshake_done());
+    EXPECT_EQ(3, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, InitializeAndHandshakeSequence)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // Initialize first
+    SrsUniquePtr<SrsSessionConfig> cfg(new SrsSessionConfig());
+    cfg->dtls_role_ = "active";
+    cfg->dtls_version_ = "1.2";
+
+    HELPER_EXPECT_SUCCESS(transport->initialize(cfg.get()));
+    EXPECT_EQ(0, mock_network.on_dtls_handshake_done_count_);
+
+    // Then start handshake
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+VOID TEST(PlaintextTransportTest, HandshakeWithoutInitialize)
+{
+    srs_error_t err;
+
+    MockRtcNetwork mock_network;
+    SrsUniquePtr<SrsPlaintextTransport> transport(new SrsPlaintextTransport(&mock_network));
+
+    // Handshake without initialize should still work
+    HELPER_EXPECT_SUCCESS(transport->start_active_handshake());
+    EXPECT_EQ(1, mock_network.on_dtls_handshake_done_count_);
+}
+
+// Mock PLI Worker Handler implementation
+MockRtcPliWorkerHandler::MockRtcPliWorkerHandler()
+{
+    do_request_keyframe_error_ = srs_success;
+    do_request_keyframe_count_ = 0;
+}
+
+MockRtcPliWorkerHandler::~MockRtcPliWorkerHandler()
+{
+    srs_freep(do_request_keyframe_error_);
+}
+
+srs_error_t MockRtcPliWorkerHandler::do_request_keyframe(uint32_t ssrc, SrsContextId cid)
+{
+    do_request_keyframe_count_++;
+    keyframe_requests_.push_back(std::make_pair(ssrc, cid));
+
+    if (do_request_keyframe_error_ != srs_success) {
+        return srs_error_copy(do_request_keyframe_error_);
+    }
+
+    return srs_success;
+}
+
+void MockRtcPliWorkerHandler::reset()
+{
+    srs_freep(do_request_keyframe_error_);
+    do_request_keyframe_error_ = srs_success;
+    do_request_keyframe_count_ = 0;
+    keyframe_requests_.clear();
+}
+
+void MockRtcPliWorkerHandler::set_do_request_keyframe_error(srs_error_t err)
+{
+    srs_freep(do_request_keyframe_error_);
+    do_request_keyframe_error_ = srs_error_copy(err);
+}
+
+bool MockRtcPliWorkerHandler::has_keyframe_request(uint32_t ssrc, const SrsContextId &cid)
+{
+    for (size_t i = 0; i < keyframe_requests_.size(); i++) {
+        if (keyframe_requests_[i].first == ssrc) {
+            // Compare the string values of the context IDs
+            std::string req_cid_str = keyframe_requests_[i].second.c_str();
+            std::string target_cid_str = cid.c_str();
+            if (req_cid_str == target_cid_str) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int MockRtcPliWorkerHandler::get_keyframe_request_count()
+{
+    return do_request_keyframe_count_;
+}
+
+MockRtcPliWorker::MockRtcPliWorker(ISrsRtcPliWorkerHandler *h) : SrsRtcPliWorker(h)
+{
+    request_keyframe_count_ = 0;
+}
+
+MockRtcPliWorker::~MockRtcPliWorker()
+{
+}
+
+void MockRtcPliWorker::request_keyframe(uint32_t ssrc, SrsContextId cid)
+{
+    request_keyframe_count_++;
+    keyframe_requests_.push_back(std::make_pair(ssrc, cid));
+    // Don't call the parent implementation to avoid actual PLI processing
+}
+
+void MockRtcPliWorker::reset()
+{
+    request_keyframe_count_ = 0;
+    keyframe_requests_.clear();
+}
+
+bool MockRtcPliWorker::has_keyframe_request(uint32_t ssrc, const SrsContextId &cid)
+{
+    for (std::vector<std::pair<uint32_t, SrsContextId> >::iterator it = keyframe_requests_.begin(); it != keyframe_requests_.end(); ++it) {
+        if (it->first == ssrc && it->second.compare(cid) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int MockRtcPliWorker::get_keyframe_request_count()
+{
+    return request_keyframe_count_;
+}
+
+VOID TEST(RtcPliWorkerTest, BasicFunctionality)
+{
+    srs_error_t err;
+
+    MockRtcPliWorkerHandler mock_handler;
+    SrsUniquePtr<SrsRtcPliWorker> worker(new SrsRtcPliWorker(&mock_handler));
+
+    // Test starting the worker
+    HELPER_EXPECT_SUCCESS(worker->start());
+
+    // Request multiple keyframes with different SSRCs
+    uint32_t ssrc1 = 12345;
+    uint32_t ssrc2 = 67890;
+
+    SrsContextId cid1;
+    SrsContextId cid2;
+    cid1.set_value("test-cid-001");
+    cid2.set_value("test-cid-002");
+
+    worker->request_keyframe(ssrc1, cid1);
+    worker->request_keyframe(ssrc2, cid2);
+
+    // Give the worker time to process requests
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+
+    // Verify both handlers were called
+    EXPECT_EQ(2, mock_handler.get_keyframe_request_count());
+    EXPECT_TRUE(mock_handler.has_keyframe_request(ssrc1, cid1));
+    EXPECT_TRUE(mock_handler.has_keyframe_request(ssrc2, cid2));
+}
+
+VOID TEST(RtcPliWorkerTest, ErrorHandling)
+{
+    srs_error_t err;
+
+    MockRtcPliWorkerHandler mock_handler;
+    SrsUniquePtr<SrsRtcPliWorker> worker(new SrsRtcPliWorker(&mock_handler));
+
+    // Test starting the worker
+    HELPER_EXPECT_SUCCESS(worker->start());
+
+    // Set up the mock handler to return an error
+    srs_error_t test_error = srs_error_new(ERROR_RTC_RTCP, "test PLI error");
+    mock_handler.set_do_request_keyframe_error(test_error);
+    srs_freep(test_error);
+
+    // Request a keyframe that should trigger the error
+    uint32_t ssrc = 12345;
+    SrsContextId cid;
+    cid.set_value("test-cid-error");
+
+    worker->request_keyframe(ssrc, cid);
+
+    // Give the worker time to process the request and handle the error
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+
+    // Verify the handler was called despite the error
+    EXPECT_EQ(1, mock_handler.get_keyframe_request_count());
+    EXPECT_TRUE(mock_handler.has_keyframe_request(ssrc, cid));
+
+    // Test that the worker continues to work after handling the error
+    mock_handler.reset();
+
+    // Request another keyframe with no error
+    uint32_t ssrc2 = 67890;
+    SrsContextId cid2;
+    cid2.set_value("test-cid-success");
+
+    worker->request_keyframe(ssrc2, cid2);
+
+    // Give the worker time to process the successful request
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+
+    // Verify the worker recovered and processed the successful request
+    EXPECT_EQ(1, mock_handler.get_keyframe_request_count());
+    EXPECT_TRUE(mock_handler.has_keyframe_request(ssrc2, cid2));
+}
+
+// Mock context implementation
+MockContext::MockContext()
+{
+    current_id_.set_value("mock-context-id");
+    get_id_result_.set_value("mock-get-id");
+}
+
+MockContext::~MockContext()
+{
+}
+
+SrsContextId MockContext::generate_id()
+{
+    SrsContextId id;
+    return id.set_value("generated-id");
+}
+
+const SrsContextId &MockContext::get_id()
+{
+    return get_id_result_;
+}
+
+const SrsContextId &MockContext::set_id(const SrsContextId &v)
+{
+    current_id_ = v;
+    return current_id_;
+}
+
+void MockContext::set_current_id(const SrsContextId &id)
+{
+    current_id_ = id;
+    get_id_result_ = id;
+}
+
+// Unit tests for SrsRtcAsyncCallOnStop::call()
+VOID TEST(RtcAsyncCallOnStopTest, CallWithHttpHooksDisabled)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Disable HTTP hooks
+    mock_config.set_http_hooks_enabled(false);
+
+    // Create SrsRtcAsyncCallOnStop with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnStop> async_call(new SrsRtcAsyncCallOnStop(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks (private members are accessible due to #define private public)
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed but not invoke hooks since they're disabled
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify no hooks were called
+    EXPECT_EQ(0, mock_hooks.on_stop_count_);
+    EXPECT_EQ(0, (int)mock_hooks.on_stop_calls_.size());
+}
+
+VOID TEST(RtcAsyncCallOnStopTest, CallWithNoOnStopConfiguration)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks but don't configure on_stop URLs
+    mock_config.set_http_hooks_enabled(true);
+    // on_stop_directive_ remains NULL
+
+    // Create SrsRtcAsyncCallOnStop with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnStop> async_call(new SrsRtcAsyncCallOnStop(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed but not invoke hooks since no URLs are configured
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify no hooks were called
+    EXPECT_EQ(0, mock_hooks.on_stop_count_);
+    EXPECT_EQ(0, (int)mock_hooks.on_stop_calls_.size());
+}
+
+VOID TEST(RtcAsyncCallOnStopTest, CallWithSingleOnStopUrl)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure single on_stop URL
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_stop");
+    mock_config.set_on_stop_urls(urls);
+
+    // Create SrsRtcAsyncCallOnStop with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnStop> async_call(new SrsRtcAsyncCallOnStop(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and invoke hooks
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify hooks were called once
+    EXPECT_EQ(1, mock_hooks.on_stop_count_);
+    EXPECT_EQ(1, (int)mock_hooks.on_stop_calls_.size());
+    EXPECT_STREQ("http://callback.server.com/on_stop", mock_hooks.on_stop_calls_[0].first.c_str());
+    // Note: The request pointer will be different because SrsRtcAsyncCallOnStop creates a copy
+    EXPECT_TRUE(mock_hooks.on_stop_calls_[0].second != NULL);
+}
+
+VOID TEST(RtcAsyncCallOnStopTest, CallWithMultipleOnStopUrls)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure multiple on_stop URLs
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback1.server.com/on_stop");
+    urls.push_back("http://callback2.server.com/on_stop");
+    urls.push_back("http://callback3.server.com/on_stop");
+    mock_config.set_on_stop_urls(urls);
+
+    // Create SrsRtcAsyncCallOnStop with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnStop> async_call(new SrsRtcAsyncCallOnStop(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and invoke all hooks
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify all hooks were called
+    EXPECT_EQ(3, mock_hooks.on_stop_count_);
+    EXPECT_EQ(3, (int)mock_hooks.on_stop_calls_.size());
+    EXPECT_STREQ("http://callback1.server.com/on_stop", mock_hooks.on_stop_calls_[0].first.c_str());
+    EXPECT_STREQ("http://callback2.server.com/on_stop", mock_hooks.on_stop_calls_[1].first.c_str());
+    EXPECT_STREQ("http://callback3.server.com/on_stop", mock_hooks.on_stop_calls_[2].first.c_str());
+
+    // All calls should use the same request object (but different from original due to copy)
+    for (int i = 0; i < 3; i++) {
+        // Note: The request pointer will be different because SrsRtcAsyncCallOnStop creates a copy
+        EXPECT_TRUE(mock_hooks.on_stop_calls_[i].second != NULL);
+    }
+}
+
+VOID TEST(RtcAsyncCallOnStopTest, CallWithContextSwitching)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure on_stop URL
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_stop");
+    mock_config.set_on_stop_urls(urls);
+
+    // Set up context IDs
+    SrsContextId original_cid;
+    original_cid.set_value("original-context-id");
+    SrsContextId new_cid;
+    new_cid.set_value("new-context-id");
+
+    // Set the mock context to return the original context ID initially
+    mock_context.set_current_id(original_cid);
+
+    // Create SrsRtcAsyncCallOnStop with the new context ID
+    SrsUniquePtr<SrsRtcAsyncCallOnStop> async_call(new SrsRtcAsyncCallOnStop(new_cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and perform context switching
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify hooks were called
+    EXPECT_EQ(1, mock_hooks.on_stop_count_);
+    EXPECT_EQ(1, (int)mock_hooks.on_stop_calls_.size());
+
+    // Verify context was switched to the new context ID
+    EXPECT_EQ(0, mock_context.current_id_.compare(new_cid));
+}
+
+VOID TEST(RtcPlayStreamTest, InitializeSuccess)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    // Create RTC play stream with mock interfaces
+    SrsContextId cid;
+    cid.set_value("test-play-stream-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+
+    // Mock the dependencies by setting the private members
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    // Create track descriptions for testing
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+
+    // Create audio track description
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio-track-id";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+    sub_relations[12345] = audio_desc;
+
+    // Create video track description
+    SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+    video_desc->type_ = "video";
+    video_desc->id_ = "video-track-id";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+    sub_relations[67890] = video_desc;
+
+    // Initialize should succeed
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+
+    // Verify stat->on_client was called
+    EXPECT_EQ(1, mock_stat.on_client_count_);
+    EXPECT_STREQ(cid.c_str(), mock_stat.last_client_id_.c_str());
+    EXPECT_EQ(SrsRtcConnPlay, mock_stat.last_client_type_);
+
+    // Verify rtc_sources->fetch_or_create was called
+    EXPECT_EQ(1, mock_rtc_sources.fetch_or_create_count_);
+
+    // Verify tracks were created
+    EXPECT_EQ(1, (int)play_stream->audio_tracks_.size());
+    EXPECT_EQ(1, (int)play_stream->video_tracks_.size());
+    EXPECT_TRUE(play_stream->audio_tracks_.find(12345) != play_stream->audio_tracks_.end());
+    EXPECT_TRUE(play_stream->video_tracks_.find(67890) != play_stream->video_tracks_.end());
+
+    // Verify NACK configuration was applied
+    EXPECT_TRUE(play_stream->nack_enabled_);
+    EXPECT_FALSE(play_stream->nack_no_copy_);
+
+    // Verify tracks have NACK configuration applied
+    SrsRtcAudioSendTrack *audio_track = play_stream->audio_tracks_[12345];
+    SrsRtcVideoSendTrack *video_track = play_stream->video_tracks_[67890];
+    EXPECT_TRUE(audio_track != NULL);
+    EXPECT_TRUE(video_track != NULL);
+
+    // Clean up track descriptions
+    srs_freep(audio_desc);
+    srs_freep(video_desc);
+}
+
+// The play stream assembles every send track it creates, so each track starts its RTX sequence space at a random
+// point. The generator is reseeded with a fixed seed whose draws are not 0, so an unassembled track, which starts
+// at 0, cannot pass.
+VOID TEST(RtcPlayStreamTest, InitializeAssemblesSendTracks)
+{
+    srs_error_t err;
+
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    SrsContextId cid;
+    cid.set_value("test-play-stream-assemble-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    SrsUniquePtr<SrsRtcTrackDescription> audio_desc(new SrsRtcTrackDescription());
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio-track-id";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+
+    SrsUniquePtr<SrsRtcTrackDescription> video_desc(new SrsRtcTrackDescription());
+    video_desc->type_ = "video";
+    video_desc->id_ = "video-track-id";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+    sub_relations[12345] = audio_desc.get();
+    sub_relations[67890] = video_desc.get();
+
+    // Fix the RTX sequence numbers by a seed of the test's own, which lasts until the test returns.
+    SrsUtestRandomState seeded(1);
+
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+
+    ASSERT_EQ(1, (int)play_stream->audio_tracks_.size());
+    ASSERT_EQ(1, (int)play_stream->video_tracks_.size());
+    EXPECT_NE(0, (int)play_stream->audio_tracks_[12345]->rtx_seq_);
+    EXPECT_NE(0, (int)play_stream->video_tracks_[67890]->rtx_seq_);
+}
+
+// The test above, defined before this one of its suite so it runs before it, fixes its RTX sequence
+// numbers by its own seed. The run's random() must not go on with that seed's sequence: every run would
+// then draw the same values after it, and two runs at once would listen on the same random ports.
+VOID TEST(RtcPlayStreamTest, InitializeSeedLeavesRunSequence)
+{
+    std::vector<long> seeded;
+    if (true) {
+        SrsUtestRandomState state(1);
+        for (int i = 0; i < 1024; i++) {
+            seeded.push_back(srs_random());
+        }
+    }
+
+    std::vector<long> run;
+    for (int i = 0; i < 4; i++) {
+        run.push_back(srs_random());
+    }
+
+    bool found = false;
+    for (int i = 0; i + (int)run.size() <= (int)seeded.size() && !found; i++) {
+        found = std::equal(run.begin(), run.end(), seeded.begin() + i);
+    }
+    EXPECT_FALSE(found);
+}
+
+VOID TEST(RtcPlayStreamTest, OnStreamChangeSuccess)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    // Create RTC play stream with mock interfaces
+    SrsContextId cid;
+    cid.set_value("test-stream-change-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+
+    // Mock the dependencies by setting the private members
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    // Create mock PLI worker and replace the real one
+    MockRtcPliWorker *mock_pli_worker = new MockRtcPliWorker(play_stream.get());
+    srs_freep(play_stream->pli_worker_); // Free the original PLI worker
+    play_stream->pli_worker_ = mock_pli_worker;
+
+    // Create initial track descriptions for testing
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+
+    // Create audio track description
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio-track-id";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+    audio_desc->media_ = new SrsCodecPayload();
+    audio_desc->media_->pt_ = 111;
+    audio_desc->media_->pt_of_publisher_ = 111;
+    sub_relations[12345] = audio_desc;
+
+    // Create video track description
+    SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+    video_desc->type_ = "video";
+    video_desc->id_ = "video-track-id";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+    video_desc->media_ = new SrsCodecPayload();
+    video_desc->media_->pt_ = 96;
+    video_desc->media_->pt_of_publisher_ = 96;
+    sub_relations[67890] = video_desc;
+
+    // Initialize the play stream first
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+
+    // Reset PLI worker to clear any initialization requests
+    mock_pli_worker->reset();
+
+    // Create source description for stream change
+    SrsRtcSourceDescription *source_desc = new SrsRtcSourceDescription();
+
+    // Create new audio track description with different payload type
+    SrsRtcTrackDescription *new_audio_desc = new SrsRtcTrackDescription();
+    new_audio_desc->type_ = "audio";
+    new_audio_desc->id_ = "new-audio-track-id";
+    new_audio_desc->ssrc_ = 54321; // Different SSRC
+    new_audio_desc->is_active_ = true;
+    new_audio_desc->media_ = new SrsCodecPayload();
+    new_audio_desc->media_->pt_ = 112; // Different payload type
+    new_audio_desc->media_->pt_of_publisher_ = 112;
+    source_desc->audio_track_desc_ = new_audio_desc;
+
+    // Create new video track description with different payload type
+    SrsRtcTrackDescription *new_video_desc = new SrsRtcTrackDescription();
+    new_video_desc->type_ = "video";
+    new_video_desc->id_ = "new-video-track-id";
+    new_video_desc->ssrc_ = 98765; // Different SSRC
+    new_video_desc->is_active_ = true;
+    new_video_desc->media_ = new SrsCodecPayload();
+    new_video_desc->media_->pt_ = 97; // Different payload type
+    new_video_desc->media_->pt_of_publisher_ = 97;
+    source_desc->video_track_descs_.push_back(new_video_desc);
+
+    // Call on_stream_change
+    play_stream->on_stream_change(source_desc);
+
+    // Verify PLI worker received keyframe requests
+    EXPECT_EQ(2, mock_pli_worker->get_keyframe_request_count());
+    EXPECT_TRUE(mock_pli_worker->has_keyframe_request(54321, cid)); // Audio SSRC
+    EXPECT_TRUE(mock_pli_worker->has_keyframe_request(98765, cid)); // Video SSRC
+
+    // Verify audio track was updated with new SSRC and payload type
+    EXPECT_EQ(1, (int)play_stream->audio_tracks_.size());
+    EXPECT_TRUE(play_stream->audio_tracks_.find(54321) != play_stream->audio_tracks_.end());
+    EXPECT_TRUE(play_stream->audio_tracks_.find(12345) == play_stream->audio_tracks_.end());
+    SrsRtcAudioSendTrack *updated_audio_track = play_stream->audio_tracks_[54321];
+    EXPECT_TRUE(updated_audio_track != NULL);
+    EXPECT_EQ(112, updated_audio_track->track_desc_->media_->pt_of_publisher_);
+
+    // Verify video track was updated with new SSRC and payload type
+    EXPECT_EQ(1, (int)play_stream->video_tracks_.size());
+    EXPECT_TRUE(play_stream->video_tracks_.find(98765) != play_stream->video_tracks_.end());
+    EXPECT_TRUE(play_stream->video_tracks_.find(67890) == play_stream->video_tracks_.end());
+    SrsRtcVideoSendTrack *updated_video_track = play_stream->video_tracks_[98765];
+    EXPECT_TRUE(updated_video_track != NULL);
+    EXPECT_EQ(97, updated_video_track->track_desc_->media_->pt_of_publisher_);
+
+    // Clean up
+    srs_freep(audio_desc);
+    srs_freep(video_desc);
+    srs_freep(source_desc);
+}
+
+// A republish brings new SSRCs: on_stream_change re-keys the track maps, so it must also clear the fast cache, or the
+// slots keep the old SSRCs and every packet of the new stream misses the cache for the rest of the session.
+VOID TEST(RtcPlayStreamTest, OnStreamChangeResetsTrackCache)
+{
+    srs_error_t err;
+
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    SrsContextId cid;
+    cid.set_value("test-stream-change-resets-cache");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    MockRtcPliWorker *mock_pli_worker = new MockRtcPliWorker(play_stream.get());
+    srs_freep(play_stream->pli_worker_);
+    play_stream->pli_worker_ = mock_pli_worker;
+
+    // The first publisher: audio 12345 and video 67890. The send tracks copy the descriptions.
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio-track-id";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+    audio_desc->media_ = new SrsCodecPayload();
+    audio_desc->media_->pt_ = 111;
+    audio_desc->media_->pt_of_publisher_ = 111;
+    sub_relations[12345] = audio_desc;
+
+    SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+    video_desc->type_ = "video";
+    video_desc->id_ = "video-track-id";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+    video_desc->media_ = new SrsCodecPayload();
+    video_desc->media_->pt_ = 96;
+    video_desc->media_->pt_of_publisher_ = 96;
+    sub_relations[67890] = video_desc;
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+
+    // One packet per SSRC fills two slots.
+    if (true) {
+        SrsRtpPacket *audio_pkt = new SrsRtpPacket();
+        audio_pkt->header_.set_ssrc(12345);
+        audio_pkt->header_.set_sequence(100);
+        audio_pkt->header_.set_payload_type(111);
+        audio_pkt->frame_type_ = SrsFrameTypeAudio;
+        HELPER_EXPECT_SUCCESS(play_stream->send_packet(audio_pkt));
+        srs_freep(audio_pkt);
+
+        SrsRtpPacket *video_pkt = new SrsRtpPacket();
+        video_pkt->header_.set_ssrc(67890);
+        video_pkt->header_.set_sequence(200);
+        video_pkt->header_.set_payload_type(96);
+        video_pkt->frame_type_ = SrsFrameTypeVideo;
+        HELPER_EXPECT_SUCCESS(play_stream->send_packet(video_pkt));
+        srs_freep(video_pkt);
+    }
+    EXPECT_EQ(12345u, play_stream->cache_ssrc0_);
+    EXPECT_EQ(67890u, play_stream->cache_ssrc1_);
+
+    // The publisher republishes with new SSRCs.
+    SrsRtcSourceDescription *source_desc = new SrsRtcSourceDescription();
+    SrsRtcTrackDescription *new_audio_desc = new SrsRtcTrackDescription();
+    new_audio_desc->type_ = "audio";
+    new_audio_desc->id_ = "new-audio-track-id";
+    new_audio_desc->ssrc_ = 54321;
+    new_audio_desc->is_active_ = true;
+    new_audio_desc->media_ = new SrsCodecPayload();
+    new_audio_desc->media_->pt_ = 111;
+    new_audio_desc->media_->pt_of_publisher_ = 111;
+    source_desc->audio_track_desc_ = new_audio_desc;
+
+    SrsRtcTrackDescription *new_video_desc = new SrsRtcTrackDescription();
+    new_video_desc->type_ = "video";
+    new_video_desc->id_ = "new-video-track-id";
+    new_video_desc->ssrc_ = 98765;
+    new_video_desc->is_active_ = true;
+    new_video_desc->media_ = new SrsCodecPayload();
+    new_video_desc->media_->pt_ = 96;
+    new_video_desc->media_->pt_of_publisher_ = 96;
+    source_desc->video_track_descs_.push_back(new_video_desc);
+    play_stream->on_stream_change(source_desc);
+
+    // The cache starts over, so nothing routes by the old SSRCs.
+    EXPECT_EQ(0u, play_stream->cache_ssrc0_);
+    EXPECT_EQ(0u, play_stream->cache_ssrc1_);
+    EXPECT_EQ(0u, play_stream->cache_ssrc2_);
+    EXPECT_TRUE(play_stream->cache_track0_ == NULL);
+    EXPECT_TRUE(play_stream->cache_track1_ == NULL);
+
+    // The first packet of the new stream takes the first slot again.
+    if (true) {
+        SrsRtpPacket *video_pkt = new SrsRtpPacket();
+        video_pkt->header_.set_ssrc(98765);
+        video_pkt->header_.set_sequence(201);
+        video_pkt->header_.set_payload_type(96);
+        video_pkt->frame_type_ = SrsFrameTypeVideo;
+        HELPER_EXPECT_SUCCESS(play_stream->send_packet(video_pkt));
+        srs_freep(video_pkt);
+    }
+    EXPECT_EQ(98765u, play_stream->cache_ssrc0_);
+    EXPECT_TRUE(play_stream->cache_track0_ == (SrsRtcSendTrack *)play_stream->video_tracks_[98765]);
+    EXPECT_EQ(0u, play_stream->cache_ssrc1_);
+
+    srs_freep(audio_desc);
+    srs_freep(video_desc);
+    srs_freep(source_desc);
+}
+
+// Mock RTC send track implementation
+MockRtcSendTrack::MockRtcSendTrack(ISrsRtcPacketSender *sender, SrsRtcTrackDescription *track_desc, bool is_audio)
+    : SrsRtcSendTrack(sender, track_desc, is_audio)
+{
+    on_rtp_error_ = srs_success;
+    on_nack_error_ = srs_success;
+    on_rtp_count_ = 0;
+    on_nack_count_ = 0;
+    last_rtp_packet_ = NULL;
+    last_nack_packet_ = NULL;
+    nack_set_to_null_ = false;
+}
+
+MockRtcSendTrack::~MockRtcSendTrack()
+{
+}
+
+srs_error_t MockRtcSendTrack::on_rtp(SrsRtpPacket *pkt)
+{
+    on_rtp_count_++;
+    last_rtp_packet_ = pkt;
+    return on_rtp_error_;
+}
+
+srs_error_t MockRtcSendTrack::on_rtcp(SrsRtpPacket *pkt)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcSendTrack::on_nack(SrsRtpPacket **ppkt)
+{
+    on_nack_count_++;
+    last_nack_packet_ = ppkt;
+    if (nack_set_to_null_ && ppkt && *ppkt) {
+        *ppkt = NULL;
+    }
+    return on_nack_error_;
+}
+
+void MockRtcSendTrack::set_on_rtp_error(srs_error_t err)
+{
+    on_rtp_error_ = err;
+}
+
+void MockRtcSendTrack::set_on_nack_error(srs_error_t err)
+{
+    on_nack_error_ = err;
+}
+
+void MockRtcSendTrack::set_nack_set_to_null(bool v)
+{
+    nack_set_to_null_ = v;
+}
+
+void MockRtcSendTrack::reset()
+{
+    on_rtp_error_ = srs_success;
+    on_nack_error_ = srs_success;
+    on_rtp_count_ = 0;
+    on_nack_count_ = 0;
+    last_rtp_packet_ = NULL;
+    last_nack_packet_ = NULL;
+    nack_set_to_null_ = false;
+}
+
+VOID TEST(RtcPlayStreamTest, SendPacketBasic)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    // Create RTC play stream with mock interfaces
+    SrsContextId cid;
+    cid.set_value("test-send-packet-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+
+    // Mock the dependencies by setting the private members
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    // Create track descriptions for audio and video
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->media_ = new SrsAudioPayload(111, "opus", 48000, 2);
+    audio_desc->ssrc_ = 12345;
+
+    SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+    video_desc->type_ = "video";
+    video_desc->media_ = new SrsVideoPayload(97, "H264", 90000);
+    video_desc->ssrc_ = 67890;
+
+    // Create mock send tracks
+    MockRtcSendTrack *mock_audio_track = new MockRtcSendTrack(&mock_packet_sender, audio_desc, true);
+    MockRtcSendTrack *mock_video_track = new MockRtcSendTrack(&mock_packet_sender, video_desc, false);
+
+    // Add tracks to play stream's collections
+    play_stream->audio_tracks_[12345] = (SrsRtcAudioSendTrack *)mock_audio_track;
+    play_stream->video_tracks_[67890] = (SrsRtcVideoSendTrack *)mock_video_track;
+
+    // Test 1: Send audio packet
+    SrsRtpPacket *audio_pkt = new SrsRtpPacket();
+    audio_pkt->header_.set_ssrc(12345);
+    audio_pkt->header_.set_sequence(100);
+    audio_pkt->header_.set_payload_type(111);
+    audio_pkt->frame_type_ = SrsFrameTypeAudio; // Set frame type for is_audio() check
+
+    HELPER_EXPECT_SUCCESS(play_stream->send_packet(audio_pkt));
+
+    // Verify audio track was called
+    EXPECT_EQ(1, mock_audio_track->on_rtp_count_);
+    EXPECT_EQ(audio_pkt, mock_audio_track->last_rtp_packet_);
+    EXPECT_EQ(0, mock_video_track->on_rtp_count_);
+
+    // Test 2: Send video packet
+    SrsRtpPacket *video_pkt = new SrsRtpPacket();
+    video_pkt->header_.set_ssrc(67890);
+    video_pkt->header_.set_sequence(200);
+    video_pkt->header_.set_payload_type(97);
+    video_pkt->frame_type_ = SrsFrameTypeVideo; // Set frame type for is_audio() check
+
+    HELPER_EXPECT_SUCCESS(play_stream->send_packet(video_pkt));
+
+    // Verify video track was called
+    EXPECT_EQ(1, mock_video_track->on_rtp_count_);
+    EXPECT_EQ(video_pkt, mock_video_track->last_rtp_packet_);
+    EXPECT_EQ(1, mock_audio_track->on_rtp_count_); // Should remain 1
+
+    // Test 3: Test cache functionality - send same audio packet again
+    SrsRtpPacket *audio_pkt2 = new SrsRtpPacket();
+    audio_pkt2->header_.set_ssrc(12345);
+    audio_pkt2->header_.set_sequence(101);
+    audio_pkt2->header_.set_payload_type(111);
+    audio_pkt2->frame_type_ = SrsFrameTypeAudio;
+
+    HELPER_EXPECT_SUCCESS(play_stream->send_packet(audio_pkt2));
+
+    // Verify cache was used (track should be called again)
+    EXPECT_EQ(2, mock_audio_track->on_rtp_count_);
+    EXPECT_EQ(audio_pkt2, mock_audio_track->last_rtp_packet_);
+
+    // Test 4: Test unknown SSRC (should be ignored)
+    SrsRtpPacket *unknown_pkt = new SrsRtpPacket();
+    unknown_pkt->header_.set_ssrc(99999);
+    unknown_pkt->header_.set_sequence(300);
+    unknown_pkt->header_.set_payload_type(96);
+    unknown_pkt->frame_type_ = SrsFrameTypeVideo;
+
+    HELPER_EXPECT_SUCCESS(play_stream->send_packet(unknown_pkt));
+
+    // Verify no tracks were called for unknown SSRC
+    EXPECT_EQ(2, mock_audio_track->on_rtp_count_); // Should remain 2
+    EXPECT_EQ(1, mock_video_track->on_rtp_count_); // Should remain 1
+
+    // Clear the track references from play_stream before cleanup to avoid double-free
+    play_stream->audio_tracks_.clear();
+    play_stream->video_tracks_.clear();
+
+    // Clean up
+    srs_freep(audio_pkt);
+    srs_freep(video_pkt);
+    srs_freep(audio_pkt2);
+
+    srs_freep(unknown_pkt);
+    srs_freep(mock_audio_track);
+    srs_freep(mock_video_track);
+    srs_freep(audio_desc);
+    srs_freep(video_desc);
+}
+
+// An unfilled cache slot holds ssrc 0, so it must never shadow the track maps for a packet whose
+// ssrc is 0. This test locks in the current behavior and passes before any refactoring, because
+// send_packet only takes the cached track when it is not NULL.
+VOID TEST(RtcPlayStreamTest, SendPacketEmptyCacheSlotDoesNotShadowTracks)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    // Create RTC play stream with mock interfaces
+    SrsContextId cid;
+    cid.set_value("test-send-packet-zero-ssrc-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+
+    // Mock the dependencies by setting the private members
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    // Create an audio track whose ssrc is 0, which collides with the unfilled cache slot.
+    SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+    audio_desc->type_ = "audio";
+    audio_desc->media_ = new SrsAudioPayload(111, "opus", 48000, 2);
+    audio_desc->ssrc_ = 0;
+
+    MockRtcSendTrack *mock_audio_track = new MockRtcSendTrack(&mock_packet_sender, audio_desc, true);
+    play_stream->audio_tracks_[0] = (SrsRtcAudioSendTrack *)mock_audio_track;
+
+    // The cache is empty, so cache_ssrc0_ is 0 and matches this packet.
+    EXPECT_EQ((uint32_t)0, play_stream->cache_ssrc0_);
+
+    SrsRtpPacket *audio_pkt = new SrsRtpPacket();
+    audio_pkt->header_.set_ssrc(0);
+    audio_pkt->header_.set_sequence(100);
+    audio_pkt->header_.set_payload_type(111);
+    audio_pkt->frame_type_ = SrsFrameTypeAudio;
+
+    HELPER_EXPECT_SUCCESS(play_stream->send_packet(audio_pkt));
+
+    // The track is found by the map, not shadowed by the empty cache slot.
+    EXPECT_EQ(1, mock_audio_track->on_rtp_count_);
+
+    // Clear the track references from play_stream before cleanup to avoid double-free
+    play_stream->audio_tracks_.clear();
+
+    // Clean up
+    srs_freep(audio_pkt);
+    srs_freep(mock_audio_track);
+    srs_freep(audio_desc);
+}
+
+// Note: NACK functionality test would require more complex setup
+// including proper track initialization and NACK buffer management.
+// The basic send_packet functionality is covered by SendPacketBasic test.
+
+// Mock RTCP classes implementations
+MockRtcpCommon::MockRtcpCommon(uint8_t type)
+{
+    mock_type_ = type;
+}
+
+MockRtcpCommon::~MockRtcpCommon()
+{
+}
+
+uint8_t MockRtcpCommon::type() const
+{
+    return mock_type_;
+}
+
+MockRtcpRR::MockRtcpRR(uint32_t sender_ssrc) : SrsRtcpRR(sender_ssrc)
+{
+}
+
+MockRtcpRR::~MockRtcpRR()
+{
+}
+
+MockRtcpNack::MockRtcpNack(uint32_t sender_ssrc) : SrsRtcpNack(sender_ssrc)
+{
+}
+
+MockRtcpNack::~MockRtcpNack()
+{
+}
+
+MockRtcpFbCommon::MockRtcpFbCommon(uint8_t rc)
+{
+    mock_rc_ = rc;
+}
+
+MockRtcpFbCommon::~MockRtcpFbCommon()
+{
+}
+
+uint8_t MockRtcpFbCommon::get_rc() const
+{
+    return mock_rc_;
+}
+
+MockRtcpXr::MockRtcpXr(uint32_t ssrc) : SrsRtcpXr(ssrc)
+{
+}
+
+MockRtcpXr::~MockRtcpXr()
+{
+}
+
+// Mock RTC send track with NACK response capability for testing on_rtcp_nack - implementation
+MockRtcSendTrackForNack::MockRtcSendTrackForNack(ISrsRtcPacketSender *sender, SrsRtcTrackDescription *track_desc, bool is_audio, uint32_t ssrc)
+    : SrsRtcSendTrack(sender, track_desc, is_audio)
+{
+    on_recv_nack_error_ = srs_success;
+    on_recv_nack_count_ = 0;
+    test_ssrc_ = ssrc;
+    track_enabled_ = true;
+}
+
+MockRtcSendTrackForNack::~MockRtcSendTrackForNack()
+{
+}
+
+srs_error_t MockRtcSendTrackForNack::on_rtp(SrsRtpPacket *pkt)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcSendTrackForNack::on_rtcp(SrsRtpPacket *pkt)
+{
+    return srs_success;
+}
+
+srs_error_t MockRtcSendTrackForNack::on_recv_nack(const std::vector<uint16_t> &lost_seqs)
+{
+    on_recv_nack_count_++;
+    last_lost_seqs_ = lost_seqs;
+    return on_recv_nack_error_;
+}
+
+bool MockRtcSendTrackForNack::has_ssrc(uint32_t ssrc)
+{
+    return ssrc == test_ssrc_;
+}
+
+bool MockRtcSendTrackForNack::get_track_status()
+{
+    return track_desc_->is_active_;
+}
+
+void MockRtcSendTrackForNack::set_track_enabled(bool enabled)
+{
+    track_desc_->is_active_ = enabled;
+}
+
+void MockRtcSendTrackForNack::set_on_recv_nack_error(srs_error_t err)
+{
+    on_recv_nack_error_ = err;
+}
+
+void MockRtcSendTrackForNack::reset()
+{
+    on_recv_nack_error_ = srs_success;
+    on_recv_nack_count_ = 0;
+    last_lost_seqs_.clear();
+}
+
+VOID TEST(RtcPlayStreamTest, OnRtcpDispatch)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_source_manager;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncTaskExecutor mock_executor;
+    MockRtcPacketSender mock_sender;
+    MockExpire mock_expire;
+
+    // Set up mock config
+    mock_config.set_http_hooks_enabled(false);
+
+    // Create a mock request
+    MockRtcAsyncCallRequest mock_request("__defaultVhost__", "live", "test");
+
+    // Create SrsRtcPlayStream
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_executor, &mock_expire, &mock_sender, _srs_context->get_id()));
+
+    // Test case 1: RTCP RR packet
+    if (true) {
+        MockRtcpRR rr_packet(0x12345678);
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp(&rr_packet));
+    }
+
+    // Test case 2: RTCP NACK packet (rtpfb type)
+    if (true) {
+        MockRtcpNack nack_packet(0x87654321);
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp(&nack_packet));
+    }
+
+    // Test case 3: RTCP PS feedback packet (psfb type)
+    if (true) {
+        MockRtcpFbCommon psfb_packet(kPLI); // PLI feedback
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp(&psfb_packet));
+    }
+
+    // Test case 4: RTCP XR packet
+    if (true) {
+        MockRtcpXr xr_packet(0xABCDEF00);
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp(&xr_packet));
+    }
+
+    // Test case 5: RTCP BYE packet (should return success)
+    if (true) {
+        MockRtcpCommon bye_packet(SrsRtcpType_bye);
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp(&bye_packet));
+    }
+
+    // Test case 6: Unknown RTCP type (should return error)
+    if (true) {
+        MockRtcpCommon unknown_packet(255); // Invalid type
+        HELPER_EXPECT_FAILED(play_stream->on_rtcp(&unknown_packet));
+    }
+}
+
+VOID TEST(RtcPlayStreamTest, OnRtcpNack)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_source_manager;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncTaskExecutor mock_executor;
+    MockRtcPacketSender mock_sender;
+    MockExpire mock_expire;
+
+    // Set up mock config
+    mock_config.set_http_hooks_enabled(false);
+
+    // Create SrsRtcPlayStream
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_executor, &mock_expire, &mock_sender, _srs_context->get_id()));
+
+    // Test case 1: NACK disabled - should succeed but not process NACK
+    if (true) {
+        // Disable NACK in play stream (simulate nack_enabled_ = false)
+        play_stream->nack_enabled_ = false;
+
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x87654321);
+        nack_packet.add_lost_sn(100);
+        nack_packet.add_lost_sn(102);
+        nack_packet.add_lost_sn(105);
+
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp_nack(&nack_packet));
+    }
+
+    // Test case 2: NACK enabled but no matching track - should return error
+    if (true) {
+        play_stream->nack_enabled_ = true;
+
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x99999999); // SSRC that doesn't match any track
+        nack_packet.add_lost_sn(200);
+
+        HELPER_EXPECT_FAILED(play_stream->on_rtcp_nack(&nack_packet));
+    }
+
+    // Test case 3: NACK enabled with matching audio track - should succeed
+    if (true) {
+        play_stream->nack_enabled_ = true;
+
+        // Create track descriptions
+        SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+        audio_desc->type_ = "audio";
+        audio_desc->ssrc_ = 0x11111111;
+        audio_desc->is_active_ = true;
+
+        // Create mock audio track
+        MockRtcSendTrackForNack *mock_audio_track = new MockRtcSendTrackForNack(&mock_sender, audio_desc, true, 0x11111111);
+        mock_audio_track->set_track_enabled(true);
+
+        // Add track to play stream
+        play_stream->audio_tracks_[0x11111111] = (SrsRtcAudioSendTrack *)mock_audio_track;
+
+        // Create NACK packet for audio track
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x11111111);
+        nack_packet.add_lost_sn(300);
+        nack_packet.add_lost_sn(301);
+
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp_nack(&nack_packet));
+
+        // Verify the track received the NACK
+        EXPECT_EQ(1, mock_audio_track->on_recv_nack_count_);
+        EXPECT_EQ(2, mock_audio_track->last_lost_seqs_.size());
+        EXPECT_EQ(300, mock_audio_track->last_lost_seqs_[0]);
+        EXPECT_EQ(301, mock_audio_track->last_lost_seqs_[1]);
+
+        // Clear track from play stream before freeing
+        play_stream->audio_tracks_.clear();
+        srs_freep(mock_audio_track);
+        srs_freep(audio_desc);
+    }
+
+    // Test case 4: NACK enabled with matching video track - should succeed
+    if (true) {
+        play_stream->nack_enabled_ = true;
+
+        // Create track descriptions
+        SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+        video_desc->type_ = "video";
+        video_desc->ssrc_ = 0x22222222;
+        video_desc->is_active_ = true;
+
+        // Create mock video track
+        MockRtcSendTrackForNack *mock_video_track = new MockRtcSendTrackForNack(&mock_sender, video_desc, false, 0x22222222);
+        mock_video_track->set_track_enabled(true);
+
+        // Add track to play stream
+        play_stream->video_tracks_[0x22222222] = (SrsRtcVideoSendTrack *)mock_video_track;
+
+        // Create NACK packet for video track
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x22222222);
+        nack_packet.add_lost_sn(400);
+        nack_packet.add_lost_sn(402);
+        nack_packet.add_lost_sn(405);
+
+        HELPER_EXPECT_SUCCESS(play_stream->on_rtcp_nack(&nack_packet));
+
+        // Verify the track received the NACK
+        EXPECT_EQ(1, mock_video_track->on_recv_nack_count_);
+        EXPECT_EQ(3, mock_video_track->last_lost_seqs_.size());
+        EXPECT_EQ(400, mock_video_track->last_lost_seqs_[0]);
+        EXPECT_EQ(402, mock_video_track->last_lost_seqs_[1]);
+        EXPECT_EQ(405, mock_video_track->last_lost_seqs_[2]);
+
+        // Clear track from play stream before freeing
+        play_stream->video_tracks_.clear();
+        srs_freep(mock_video_track);
+        srs_freep(video_desc);
+    }
+
+    // Test case 5: NACK with disabled track - should not find track
+    if (true) {
+        play_stream->nack_enabled_ = true;
+
+        // Create track descriptions
+        SrsRtcTrackDescription *audio_desc = new SrsRtcTrackDescription();
+        audio_desc->type_ = "audio";
+        audio_desc->ssrc_ = 0x33333333;
+        audio_desc->is_active_ = true;
+
+        // Create mock audio track but disable it
+        MockRtcSendTrackForNack *mock_audio_track = new MockRtcSendTrackForNack(&mock_sender, audio_desc, true, 0x33333333);
+        mock_audio_track->set_track_enabled(false); // Disabled track
+
+        // Add track to play stream
+        play_stream->audio_tracks_[0x33333333] = (SrsRtcAudioSendTrack *)mock_audio_track;
+
+        // Create NACK packet for disabled track
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x33333333);
+        nack_packet.add_lost_sn(500);
+
+        HELPER_EXPECT_FAILED(play_stream->on_rtcp_nack(&nack_packet));
+
+        // Verify the track did not receive the NACK
+        EXPECT_EQ(0, mock_audio_track->on_recv_nack_count_);
+
+        // Clear track from play stream before freeing
+        play_stream->audio_tracks_.clear();
+        srs_freep(mock_audio_track);
+        srs_freep(audio_desc);
+    }
+
+    // Test case 6: NACK with track error - should propagate error
+    if (true) {
+        play_stream->nack_enabled_ = true;
+
+        // Create track descriptions
+        SrsRtcTrackDescription *video_desc = new SrsRtcTrackDescription();
+        video_desc->type_ = "video";
+        video_desc->ssrc_ = 0x44444444;
+        video_desc->is_active_ = true;
+
+        // Create mock video track that returns error
+        MockRtcSendTrackForNack *mock_video_track = new MockRtcSendTrackForNack(&mock_sender, video_desc, false, 0x44444444);
+        mock_video_track->set_track_enabled(true);
+        mock_video_track->set_on_recv_nack_error(srs_error_new(ERROR_RTC_STUN, "mock nack error"));
+
+        // Add track to play stream
+        play_stream->video_tracks_[0x44444444] = (SrsRtcVideoSendTrack *)mock_video_track;
+
+        // Create NACK packet for error track
+        MockRtcpNack nack_packet(0x12345678);
+        nack_packet.set_media_ssrc(0x44444444);
+        nack_packet.add_lost_sn(600);
+
+        HELPER_EXPECT_FAILED(play_stream->on_rtcp_nack(&nack_packet));
+
+        // Verify the track received the NACK but returned error
+        EXPECT_EQ(1, mock_video_track->on_recv_nack_count_);
+
+        // Clear track from play stream before freeing
+        play_stream->video_tracks_.clear();
+        srs_freep(mock_video_track);
+        srs_freep(video_desc);
+    }
+}
+
+VOID TEST(RtcPlayStreamTest, DoRequestKeyframe)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+
+    // Create RTC play stream with mock interfaces
+    SrsContextId cid;
+    cid.set_value("test-do-request-keyframe-cid");
+    SrsUniquePtr<SrsRtcPlayStream> play_stream(new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid));
+
+    // Mock the dependencies by setting the private members
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+
+    // Initialize the play stream
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+
+    // Test 1: No publisher stream - should return success without doing anything
+    {
+        uint32_t test_ssrc = 12345;
+        SrsContextId test_cid;
+        test_cid.set_value("test-subscriber-cid");
+
+        HELPER_EXPECT_SUCCESS(play_stream->do_request_keyframe(test_ssrc, test_cid));
+    }
+
+    // Test 2: With publisher stream - should call request_keyframe on publisher
+    {
+        // Create mock publisher stream
+        MockRtcPublishStream *mock_publisher = new MockRtcPublishStream();
+        SrsContextId publisher_cid;
+        publisher_cid.set_value("test-publisher-cid");
+        mock_publisher->set_context_id(publisher_cid);
+
+        // Set the publisher stream in the source
+        play_stream->source_->set_publish_stream(mock_publisher);
+
+        uint32_t test_ssrc = 67890;
+        SrsContextId test_cid;
+        test_cid.set_value("test-subscriber-cid-2");
+
+        // Call do_request_keyframe
+        HELPER_EXPECT_SUCCESS(play_stream->do_request_keyframe(test_ssrc, test_cid));
+
+        // Verify that request_keyframe was called on the publisher
+        EXPECT_EQ(1, mock_publisher->request_keyframe_count_);
+        EXPECT_EQ(test_ssrc, mock_publisher->last_keyframe_ssrc_);
+        EXPECT_EQ(0, test_cid.compare(mock_publisher->last_keyframe_cid_));
+
+        // Clean up - the source will handle the publisher cleanup
+        play_stream->source_->set_publish_stream(NULL);
+        srs_freep(mock_publisher);
+    }
+}
+
+// Mock RTCP sender implementation
+MockRtcRtcpSender::MockRtcRtcpSender()
+{
+    is_sender_started_ = true;
+    is_sender_twcc_enabled_ = false;
+    send_rtcp_rr_error_ = srs_success;
+    send_rtcp_xr_rrtr_error_ = srs_success;
+    send_periodic_twcc_error_ = srs_success;
+    send_rtcp_rr_count_ = 0;
+    send_rtcp_xr_rrtr_count_ = 0;
+    send_periodic_twcc_count_ = 0;
+    report_frame_stats_count_ = 0;
+}
+
+MockRtcRtcpSender::~MockRtcRtcpSender()
+{
+    srs_freep(send_rtcp_rr_error_);
+    srs_freep(send_rtcp_xr_rrtr_error_);
+    srs_freep(send_periodic_twcc_error_);
+}
+
+bool MockRtcRtcpSender::is_sender_started()
+{
+    return is_sender_started_;
+}
+
+srs_error_t MockRtcRtcpSender::send_rtcp_rr()
+{
+    send_rtcp_rr_count_++;
+    return srs_error_copy(send_rtcp_rr_error_);
+}
+
+srs_error_t MockRtcRtcpSender::send_rtcp_xr_rrtr()
+{
+    send_rtcp_xr_rrtr_count_++;
+    return srs_error_copy(send_rtcp_xr_rrtr_error_);
+}
+
+void MockRtcRtcpSender::report_frame_stats()
+{
+    report_frame_stats_count_++;
+}
+
+bool MockRtcRtcpSender::is_sender_twcc_enabled()
+{
+    return is_sender_twcc_enabled_;
+}
+
+srs_error_t MockRtcRtcpSender::send_periodic_twcc()
+{
+    send_periodic_twcc_count_++;
+    return srs_error_copy(send_periodic_twcc_error_);
+}
+
+void MockRtcRtcpSender::set_sender_started(bool started)
+{
+    is_sender_started_ = started;
+}
+
+void MockRtcRtcpSender::set_sender_twcc_enabled(bool enabled)
+{
+    is_sender_twcc_enabled_ = enabled;
+}
+
+void MockRtcRtcpSender::set_send_rtcp_rr_error(srs_error_t err)
+{
+    srs_freep(send_rtcp_rr_error_);
+    send_rtcp_rr_error_ = srs_error_copy(err);
+}
+
+void MockRtcRtcpSender::set_send_rtcp_xr_rrtr_error(srs_error_t err)
+{
+    srs_freep(send_rtcp_xr_rrtr_error_);
+    send_rtcp_xr_rrtr_error_ = srs_error_copy(err);
+}
+
+void MockRtcRtcpSender::set_send_periodic_twcc_error(srs_error_t err)
+{
+    srs_freep(send_periodic_twcc_error_);
+    send_periodic_twcc_error_ = srs_error_copy(err);
+}
+
+void MockRtcRtcpSender::reset()
+{
+    is_sender_started_ = true;
+    is_sender_twcc_enabled_ = false;
+    srs_freep(send_rtcp_rr_error_);
+    srs_freep(send_rtcp_xr_rrtr_error_);
+    srs_freep(send_periodic_twcc_error_);
+    send_rtcp_rr_error_ = srs_success;
+    send_rtcp_xr_rrtr_error_ = srs_success;
+    send_periodic_twcc_error_ = srs_success;
+    send_rtcp_rr_count_ = 0;
+    send_rtcp_xr_rrtr_count_ = 0;
+    send_periodic_twcc_count_ = 0;
+    report_frame_stats_count_ = 0;
+}
+
+VOID TEST(SrsRtcPublishRtcpTimerTest, OnTimer)
+{
+    srs_error_t err;
+
+    // Create mock RTCP sender
+    MockRtcRtcpSender *mock_sender = new MockRtcRtcpSender();
+
+    // Create timer with mock sender
+    SrsUniquePtr<SrsRtcPublishRtcpTimer> timer(new SrsRtcPublishRtcpTimer(mock_sender));
+
+    // Test 1: Normal operation - sender started, both RTCP calls succeed
+    {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify both RTCP methods were called
+        EXPECT_EQ(1, mock_sender->send_rtcp_rr_count_);
+        EXPECT_EQ(1, mock_sender->send_rtcp_xr_rrtr_count_);
+    }
+
+    // Test 2: Sender not started - should return success but not call RTCP methods
+    {
+        mock_sender->reset();
+        mock_sender->set_sender_started(false);
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify RTCP methods were not called
+        EXPECT_EQ(0, mock_sender->send_rtcp_rr_count_);
+        EXPECT_EQ(0, mock_sender->send_rtcp_xr_rrtr_count_);
+    }
+
+    // Test 3: send_rtcp_rr fails - should continue and call send_rtcp_xr_rrtr
+    {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_send_rtcp_rr_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock rr error"));
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify both methods were called despite RR error
+        EXPECT_EQ(1, mock_sender->send_rtcp_rr_count_);
+        EXPECT_EQ(1, mock_sender->send_rtcp_xr_rrtr_count_);
+    }
+
+    // Test 4: send_rtcp_xr_rrtr fails - should still return success
+    {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_send_rtcp_xr_rrtr_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock xr error"));
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify both methods were called
+        EXPECT_EQ(1, mock_sender->send_rtcp_rr_count_);
+        EXPECT_EQ(1, mock_sender->send_rtcp_xr_rrtr_count_);
+    }
+
+    // Test 5: Both RTCP methods fail - should still return success
+    {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_send_rtcp_rr_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock rr error"));
+        mock_sender->set_send_rtcp_xr_rrtr_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock xr error"));
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify both methods were called despite errors
+        EXPECT_EQ(1, mock_sender->send_rtcp_rr_count_);
+        EXPECT_EQ(1, mock_sender->send_rtcp_xr_rrtr_count_);
+    }
+
+    srs_freep(mock_sender);
+}
+
+// The 1s RTCP timer of a WebRTC publisher reports its frame counts, so the
+// stream stats lag the frames by a second at most; nothing before it starts.
+VOID TEST(SrsRtcPublishRtcpTimerTest, OnTimerReportsFrameStats)
+{
+    srs_error_t err;
+
+    SrsUniquePtr<MockRtcRtcpSender> mock_sender(new MockRtcRtcpSender());
+    SrsUniquePtr<SrsRtcPublishRtcpTimer> timer(new SrsRtcPublishRtcpTimer(mock_sender.get()));
+
+    mock_sender->set_sender_started(false);
+    HELPER_EXPECT_SUCCESS(timer->on_timer(SRS_UTIME_SECONDS));
+    EXPECT_EQ(0, mock_sender->report_frame_stats_count_);
+
+    mock_sender->set_sender_started(true);
+    HELPER_EXPECT_SUCCESS(timer->on_timer(SRS_UTIME_SECONDS));
+    EXPECT_EQ(1, mock_sender->report_frame_stats_count_);
+
+    // A failed RR doesn't stop the report.
+    mock_sender->set_send_rtcp_rr_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock rr error"));
+    HELPER_EXPECT_SUCCESS(timer->on_timer(SRS_UTIME_SECONDS));
+    EXPECT_EQ(2, mock_sender->report_frame_stats_count_);
+}
+
+VOID TEST(SrsRtcPublishTwccTimerTest, OnTimer)
+{
+    srs_error_t err;
+
+    // Create mock RTCP sender
+    MockRtcRtcpSender *mock_sender = new MockRtcRtcpSender();
+
+    // Create timer with mock sender
+    SrsUniquePtr<SrsRtcPublishTwccTimer> timer(new SrsRtcPublishTwccTimer(mock_sender));
+
+    // Test 1: Normal operation - sender started, TWCC enabled, circuit breaker not critical
+    if (true) {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_sender_twcc_enabled(true);
+
+        // Mock circuit breaker to not be in critical state
+        MockCircuitBreaker mock_circuit_breaker;
+        mock_circuit_breaker.hybrid_critical_water_level_ = false;
+        ISrsCircuitBreaker *original_circuit_breaker = _srs_circuit_breaker;
+        _srs_circuit_breaker = &mock_circuit_breaker;
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify send_periodic_twcc was called
+        EXPECT_EQ(1, mock_sender->send_periodic_twcc_count_);
+
+        // Restore original circuit breaker
+        _srs_circuit_breaker = original_circuit_breaker;
+    }
+
+    // Test 2: Sender not started - should return early without calling TWCC methods
+    if (true) {
+        mock_sender->reset();
+        mock_sender->set_sender_started(false);
+        mock_sender->set_sender_twcc_enabled(true);
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify no TWCC methods were called
+        EXPECT_EQ(0, mock_sender->send_periodic_twcc_count_);
+    }
+
+    // Test 3: Sender started but TWCC disabled - should return early without calling send_periodic_twcc
+    if (true) {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_sender_twcc_enabled(false);
+
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify send_periodic_twcc was not called
+        EXPECT_EQ(0, mock_sender->send_periodic_twcc_count_);
+    }
+
+    // Test 4: Circuit breaker in critical state - should return early without calling send_periodic_twcc
+    if (true) {
+        // Mock circuit breaker to be in critical state - must be set BEFORE creating timer
+        MockCircuitBreaker mock_circuit_breaker;
+        mock_circuit_breaker.hybrid_critical_water_level_ = true;
+        ISrsCircuitBreaker *original_circuit_breaker = _srs_circuit_breaker;
+        _srs_circuit_breaker = &mock_circuit_breaker;
+
+        // Create new timer with the mock circuit breaker
+        SrsUniquePtr<SrsRtcPublishTwccTimer> timer_with_mock_cb(new SrsRtcPublishTwccTimer(mock_sender));
+
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_sender_twcc_enabled(true);
+
+        HELPER_EXPECT_SUCCESS(timer_with_mock_cb->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify send_periodic_twcc was not called due to circuit breaker
+        EXPECT_EQ(0, mock_sender->send_periodic_twcc_count_);
+
+        // Restore original circuit breaker
+        _srs_circuit_breaker = original_circuit_breaker;
+    }
+
+    // Test 5: send_periodic_twcc returns error - should handle error gracefully and continue
+    if (true) {
+        mock_sender->reset();
+        mock_sender->set_sender_started(true);
+        mock_sender->set_sender_twcc_enabled(true);
+        mock_sender->set_send_periodic_twcc_error(srs_error_new(ERROR_RTC_RTP_MUXER, "mock twcc error"));
+
+        // Mock circuit breaker to not be in critical state
+        MockCircuitBreaker mock_circuit_breaker;
+        mock_circuit_breaker.hybrid_critical_water_level_ = false;
+        ISrsCircuitBreaker *original_circuit_breaker = _srs_circuit_breaker;
+        _srs_circuit_breaker = &mock_circuit_breaker;
+
+        // Should still return success even when send_periodic_twcc fails
+        HELPER_EXPECT_SUCCESS(timer->on_timer(100 * SRS_UTIME_MILLISECONDS));
+
+        // Verify send_periodic_twcc was called despite error
+        EXPECT_EQ(1, mock_sender->send_periodic_twcc_count_);
+
+        // Restore original circuit breaker
+        _srs_circuit_breaker = original_circuit_breaker;
+    }
+
+    srs_freep(mock_sender);
+}
+
+// Unit tests for SrsRtcAsyncCallOnUnpublish::call()
+VOID TEST(RtcAsyncCallOnUnpublishTest, CallWithHttpHooksDisabled)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Disable HTTP hooks
+    mock_config.set_http_hooks_enabled(false);
+
+    // Create SrsRtcAsyncCallOnUnpublish with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnUnpublish> async_call(new SrsRtcAsyncCallOnUnpublish(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks (private members are accessible due to #define private public)
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed but not invoke hooks since they're disabled
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify no hooks were called
+    EXPECT_EQ(0, mock_hooks.on_unpublish_count_);
+    EXPECT_EQ(0, (int)mock_hooks.on_unpublish_calls_.size());
+}
+
+VOID TEST(RtcAsyncCallOnUnpublishTest, CallWithNoOnUnpublishConfiguration)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks but don't configure on_unpublish URLs
+    mock_config.set_http_hooks_enabled(true);
+    // on_unpublish_directive_ remains NULL
+
+    // Create SrsRtcAsyncCallOnUnpublish with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnUnpublish> async_call(new SrsRtcAsyncCallOnUnpublish(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed but not invoke hooks since no URLs are configured
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify no hooks were called
+    EXPECT_EQ(0, mock_hooks.on_unpublish_count_);
+    EXPECT_EQ(0, (int)mock_hooks.on_unpublish_calls_.size());
+}
+
+VOID TEST(RtcAsyncCallOnUnpublishTest, CallWithSingleOnUnpublishUrl)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure single on_unpublish URL
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_unpublish");
+    mock_config.set_on_unpublish_urls(urls);
+
+    // Create SrsRtcAsyncCallOnUnpublish with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnUnpublish> async_call(new SrsRtcAsyncCallOnUnpublish(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and invoke hooks
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify hooks were called once
+    EXPECT_EQ(1, mock_hooks.on_unpublish_count_);
+    EXPECT_EQ(1, (int)mock_hooks.on_unpublish_calls_.size());
+    EXPECT_STREQ("http://callback.server.com/on_unpublish", mock_hooks.on_unpublish_calls_[0].first.c_str());
+    // Note: The request pointer will be different because SrsRtcAsyncCallOnUnpublish creates a copy
+    EXPECT_TRUE(mock_hooks.on_unpublish_calls_[0].second != NULL);
+}
+
+VOID TEST(RtcAsyncCallOnUnpublishTest, CallWithMultipleOnUnpublishUrls)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure multiple on_unpublish URLs
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback1.server.com/on_unpublish");
+    urls.push_back("http://callback2.server.com/on_unpublish");
+    urls.push_back("http://callback3.server.com/on_unpublish");
+    mock_config.set_on_unpublish_urls(urls);
+
+    // Create SrsRtcAsyncCallOnUnpublish with mocked dependencies
+    SrsContextId cid;
+    cid.set_value("test-context-id");
+
+    SrsUniquePtr<SrsRtcAsyncCallOnUnpublish> async_call(new SrsRtcAsyncCallOnUnpublish(cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and invoke all hooks
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify all hooks were called
+    EXPECT_EQ(3, mock_hooks.on_unpublish_count_);
+    EXPECT_EQ(3, (int)mock_hooks.on_unpublish_calls_.size());
+    EXPECT_STREQ("http://callback1.server.com/on_unpublish", mock_hooks.on_unpublish_calls_[0].first.c_str());
+    EXPECT_STREQ("http://callback2.server.com/on_unpublish", mock_hooks.on_unpublish_calls_[1].first.c_str());
+    EXPECT_STREQ("http://callback3.server.com/on_unpublish", mock_hooks.on_unpublish_calls_[2].first.c_str());
+
+    // All calls should use the same request object (but different from original due to copy)
+    for (int i = 0; i < 3; i++) {
+        // Note: The request pointer will be different because SrsRtcAsyncCallOnUnpublish creates a copy
+        EXPECT_TRUE(mock_hooks.on_unpublish_calls_[i].second != NULL);
+    }
+}
+
+VOID TEST(RtcAsyncCallOnUnpublishTest, CallWithContextSwitching)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+
+    // Enable HTTP hooks and configure on_unpublish URL
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_unpublish");
+    mock_config.set_on_unpublish_urls(urls);
+
+    // Set up context IDs
+    SrsContextId original_cid;
+    original_cid.set_value("original-context-id");
+    SrsContextId new_cid;
+    new_cid.set_value("new-context-id");
+
+    // Create SrsRtcAsyncCallOnUnpublish with the new context ID
+    SrsUniquePtr<SrsRtcAsyncCallOnUnpublish> async_call(new SrsRtcAsyncCallOnUnpublish(new_cid, &mock_request, SrsStatisticStreamSnapshot()));
+
+    // Replace the dependencies with mocks
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+
+    // Call should succeed and perform context switching
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    // Verify hooks were called
+    EXPECT_EQ(1, mock_hooks.on_unpublish_count_);
+    EXPECT_EQ(1, (int)mock_hooks.on_unpublish_calls_.size());
+
+    // Note: Context switching verification is not as straightforward for SrsRtcAsyncCallOnUnpublish
+    // because it uses _srs_context directly instead of a member variable like SrsRtcAsyncCallOnStop
+}
+
+MockStatisticDropsStream::MockStatisticDropsStream()
+{
+    stream_ = new SrsStatisticStream();
+    stream_->id_ = "vid-stopped";
+    stream_->nb_clients_ = 2;
+    dropped_ = false;
+}
+
+MockStatisticDropsStream::~MockStatisticDropsStream()
+{
+    srs_freep(stream_);
+}
+
+SrsStatisticStream *MockStatisticDropsStream::find_stream_by_url(std::string url)
+{
+    return (!dropped_ && url == stream_->url_) ? stream_ : NULL;
+}
+
+void MockStatisticDropsStream::on_disconnect(std::string id, srs_error_t err)
+{
+    MockAppStatistic::on_disconnect(id, err);
+    dropped_ = true;
+}
+
+// The on_unpublish of a WebRTC publisher runs from a queue, after the publisher
+// is gone and the stats may have dropped the stream: it still names the stream
+// as it was when the publisher stopped.
+VOID TEST(RtcAsyncCallOnUnpublishTest, HookKeepsStreamOfStoppedPublisher)
+{
+    srs_error_t err;
+
+    MockStatisticDropsStream mock_stat;
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    SrsContextId cid;
+    cid.set_value("stopped-publisher");
+    mock_stat.stream_->url_ = mock_request.get_stream_url();
+
+    // The publisher stops: it queues its hook, and the stats drop the stream.
+    SrsRtcPublishStream *publish_stream = new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid);
+    publish_stream->stat_ = &mock_stat;
+    publish_stream->req_ = mock_request.copy();
+    srs_freep(publish_stream);
+
+    EXPECT_EQ(1, mock_stat.on_disconnect_count_);
+    EXPECT_TRUE(mock_stat.find_stream_by_url(mock_request.get_stream_url()) == NULL);
+    ASSERT_EQ(1, mock_exec.exec_count_);
+    SrsUniquePtr<ISrsAsyncCallTask> task(mock_exec.last_task_);
+    SrsRtcAsyncCallOnUnpublish *async_call = dynamic_cast<SrsRtcAsyncCallOnUnpublish *>(task.get());
+    ASSERT_TRUE(async_call != NULL);
+
+    // The queue runs the hook.
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_unpublish");
+    mock_config.set_on_unpublish_urls(urls);
+    async_call->hooks_ = &mock_hooks;
+    async_call->config_ = &mock_config;
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    EXPECT_EQ(1, mock_hooks.on_unpublish_count_);
+    EXPECT_STREQ("vid-stopped", mock_hooks.last_stream_.id_.c_str());
+    EXPECT_EQ(2, mock_hooks.last_stream_.clients_);
+}
+
+// The on_stop of a WebRTC player runs from a queue, after the player is gone
+// and the stats may have dropped the stream: it still names the stream and its
+// clients, the player among them, as they were when the player stopped.
+VOID TEST(RtcAsyncCallOnStopTest, HookKeepsStreamOfStoppedPlayer)
+{
+    srs_error_t err;
+
+    MockStatisticDropsStream mock_stat;
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_sender;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    SrsContextId cid;
+    cid.set_value("stopped-player");
+    mock_stat.stream_->url_ = mock_request.get_stream_url();
+
+    // The player stops: it queues its hook, and the stats drop the stream.
+    SrsRtcPlayStream *play_stream = new SrsRtcPlayStream(&mock_exec, &mock_expire, &mock_sender, cid);
+    play_stream->stat_ = &mock_stat;
+    play_stream->req_ = mock_request.copy();
+    srs_freep(play_stream);
+
+    EXPECT_EQ(1, mock_stat.on_disconnect_count_);
+    EXPECT_TRUE(mock_stat.find_stream_by_url(mock_request.get_stream_url()) == NULL);
+    ASSERT_EQ(1, mock_exec.exec_count_);
+    SrsUniquePtr<ISrsAsyncCallTask> task(mock_exec.last_task_);
+    SrsRtcAsyncCallOnStop *async_call = dynamic_cast<SrsRtcAsyncCallOnStop *>(task.get());
+    ASSERT_TRUE(async_call != NULL);
+
+    // The queue runs the hook.
+    MockAppConfig mock_config;
+    MockHttpHooks mock_hooks;
+    MockContext mock_context;
+    mock_config.set_http_hooks_enabled(true);
+    std::vector<std::string> urls;
+    urls.push_back("http://callback.server.com/on_stop");
+    mock_config.set_on_stop_urls(urls);
+    async_call->hooks_ = &mock_hooks;
+    async_call->context_ = &mock_context;
+    async_call->config_ = &mock_config;
+    HELPER_EXPECT_SUCCESS(async_call->call());
+
+    EXPECT_EQ(1, mock_hooks.on_stop_count_);
+    EXPECT_STREQ("vid-stopped", mock_hooks.last_stream_.id_.c_str());
+    EXPECT_EQ(2, mock_hooks.last_stream_.clients_);
+}
+
+VOID TEST(RtcPublishStreamTest, Initialize)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockAppStatistic mock_stat;
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockLiveSourceManager mock_live_sources;
+    MockSrtSourceManager mock_srt_sources;
+    MockRtcPacketReceiver mock_receiver;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockExpire mock_expire;
+
+    // Create SrsRtcPublishStream with mock dependencies
+    SrsContextId cid;
+    cid.set_value("test-publish-stream-id");
+
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Set mock dependencies
+    publish_stream->stat_ = &mock_stat;
+    publish_stream->config_ = &mock_config;
+    publish_stream->rtc_sources_ = &mock_rtc_sources;
+    publish_stream->live_sources_ = &mock_live_sources;
+    publish_stream->srt_sources_ = &mock_srt_sources;
+
+    // Create stream description with audio and video tracks
+    SrsUniquePtr<SrsRtcSourceDescription> stream_desc(new SrsRtcSourceDescription());
+
+    // Add audio track description
+    stream_desc->audio_track_desc_ = new SrsRtcTrackDescription();
+    stream_desc->audio_track_desc_->type_ = "audio";
+    stream_desc->audio_track_desc_->id_ = "audio-track-1";
+    stream_desc->audio_track_desc_->ssrc_ = 12345;
+
+    // Add video track description with TWCC extension
+    SrsRtcTrackDescription *video_track = new SrsRtcTrackDescription();
+    video_track->type_ = "video";
+    video_track->id_ = "video-track-1";
+    video_track->ssrc_ = 67890;
+    video_track->add_rtp_extension_desc(1, "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01");
+    stream_desc->video_track_descs_.push_back(video_track);
+
+    // Configure mock config
+    mock_config.set_rtc_nack_enabled(true);
+    mock_config.set_rtc_nack_no_copy(false);
+    mock_config.set_rtc_drop_for_pt(0);
+    mock_config.set_rtc_twcc_enabled(true);
+    mock_config.set_srt_enabled(true);
+    mock_config.set_rtc_to_rtmp(true);
+
+    // Test successful initialization
+    HELPER_EXPECT_SUCCESS(publish_stream->initialize(&mock_request, stream_desc.get()));
+
+    // Verify mock calls
+    EXPECT_EQ(1, mock_stat.on_client_count_);
+    EXPECT_EQ(1, mock_rtc_sources.fetch_or_create_count_);
+    EXPECT_EQ(1, mock_live_sources.fetch_or_create_count_);
+    EXPECT_EQ(1, mock_srt_sources.fetch_or_create_count_);
+}
+
+VOID TEST(SrsRtcPublishStreamTest, OnTwccSuccess)
+{
+    srs_error_t err;
+
+    // Create mock objects
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockRtcExpire mock_expire;
+    MockRtcPacketReceiver mock_receiver;
+    SrsContextId cid;
+    cid.set_value("test-twcc-stream-id");
+
+    // Create SrsRtcPublishStream with mock dependencies
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    // Test on_twcc with a typical sequence number
+    uint16_t test_sn = 12345;
+    HELPER_EXPECT_SUCCESS(publish_stream->on_twcc(test_sn));
+
+    // Test on_twcc with different sequence numbers to verify it handles multiple packets
+    HELPER_EXPECT_SUCCESS(publish_stream->on_twcc(12346));
+    HELPER_EXPECT_SUCCESS(publish_stream->on_twcc(12347));
+
+    // Test duplicate sequence number should fail
+    HELPER_EXPECT_FAILED(publish_stream->on_twcc(12345));
+}
+
+MockAppConfigForDtlsCertificate::MockAppConfigForDtlsCertificate()
+{
+    ecdsa_ = true;
+    get_rtc_server_ecdsa_count_ = 0;
+}
+
+MockAppConfigForDtlsCertificate::~MockAppConfigForDtlsCertificate()
+{
+}
+
+bool MockAppConfigForDtlsCertificate::get_rtc_server_ecdsa()
+{
+    get_rtc_server_ecdsa_count_++;
+    return ecdsa_;
+}
+
+// The certificate captures the config global in the constructor.
+VOID TEST(DtlsCertificateTest, CapturesConfigInConstructor)
+{
+    SrsDtlsCertificate cert;
+    EXPECT_TRUE(cert.config_ != NULL);
+    EXPECT_TRUE(cert.config_ == (ISrsAppConfig *)_srs_config);
+}
+
+// The injected config selects an ECDSA key, and the certificate and its fingerprint are built.
+VOID TEST(DtlsCertificateTest, InitializeEcdsaFromInjectedConfig)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForDtlsCertificate config;
+    config.ecdsa_ = true;
+
+    SrsDtlsCertificate cert;
+    cert.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_ecdsa_count_);
+    EXPECT_TRUE(cert.is_ecdsa());
+    EXPECT_TRUE(cert.get_ecdsa_key() != NULL);
+    EXPECT_TRUE(cert.get_cert() != NULL);
+    ASSERT_TRUE(cert.get_public_key() != NULL);
+    EXPECT_EQ(EVP_PKEY_EC, EVP_PKEY_id(cert.get_public_key()));
+
+    // A SHA-256 fingerprint is 32 hex pairs joined by colons.
+    EXPECT_EQ(95, (int)cert.get_fingerprint().size());
+
+    cert.config_ = NULL;
+}
+
+// The injected config turns ECDSA off, so the key is RSA. The global config
+// defaults to ECDSA, so reading it instead would be caught here.
+VOID TEST(DtlsCertificateTest, InitializeRsaFromInjectedConfig)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForDtlsCertificate config;
+    config.ecdsa_ = false;
+
+    SrsDtlsCertificate cert;
+    cert.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_ecdsa_count_);
+    EXPECT_FALSE(cert.is_ecdsa());
+    EXPECT_TRUE(cert.get_ecdsa_key() == NULL);
+    EXPECT_TRUE(cert.get_cert() != NULL);
+    ASSERT_TRUE(cert.get_public_key() != NULL);
+    EXPECT_EQ(EVP_PKEY_RSA, EVP_PKEY_id(cert.get_public_key()));
+    EXPECT_EQ(95, (int)cert.get_fingerprint().size());
+
+    cert.config_ = NULL;
+}
+
+// A DTLS context at the OpenSSL default security level takes the RSA certificate and key.
+// OpenSSL 3.2+ defaults to level 2, which refuses an RSA key below 2048 bits.
+VOID TEST(DtlsCertificateTest, RsaCertificateFitsTheDefaultSecurityLevel)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForDtlsCertificate config;
+    config.ecdsa_ = false;
+
+    SrsDtlsCertificate cert;
+    cert.config_ = &config;
+    HELPER_ASSERT_SUCCESS(cert.initialize());
+
+    SSL_CTX *ctx = SSL_CTX_new(DTLS_method());
+    ASSERT_TRUE(ctx != NULL);
+    EXPECT_EQ(1, SSL_CTX_use_certificate(ctx, cert.get_cert()));
+    EXPECT_EQ(1, SSL_CTX_use_PrivateKey(ctx, cert.get_public_key()));
+    SSL_CTX_free(ctx);
+
+    cert.config_ = NULL;
+}
+
+// A second initialize keeps the first certificate and does not read the config again.
+VOID TEST(DtlsCertificateTest, InitializeOnceReadsConfigOnce)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForDtlsCertificate config;
+    config.ecdsa_ = false;
+
+    SrsDtlsCertificate cert;
+    cert.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+    X509 *first = cert.get_cert();
+    string fingerprint = cert.get_fingerprint();
+
+    config.ecdsa_ = true;
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_ecdsa_count_);
+    EXPECT_FALSE(cert.is_ecdsa());
+    EXPECT_TRUE(cert.get_cert() == first);
+    EXPECT_STREQ(fingerprint.c_str(), cert.get_fingerprint().c_str());
+
+    cert.config_ = NULL;
+}
+
+// The constructor allocates the generator that draws the certificate serial, so a test can
+// replace it before initialize().
+VOID TEST(DtlsCertificateTest, ConstructorCreatesRand)
+{
+    SrsDtlsCertificate cert;
+    EXPECT_TRUE(cert.rand_ != NULL);
+    EXPECT_TRUE(cert.get_cert() == NULL);
+}
+
+// The serial number of the certificate is one draw of the injected generator, taken by the first
+// initialize only; a second initialize keeps the certificate and draws nothing.
+VOID TEST(DtlsCertificateTest, InitializeDrawsSerialThroughInjectedRand)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForDtlsCertificate config;
+    MockRandForHandshake rand;
+    rand.integer_value_ = 0x5a17c3e1;
+
+    SrsDtlsCertificate cert;
+    cert.config_ = &config;
+    srs_freep(cert.rand_);
+    cert.rand_ = &rand;
+
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+    HELPER_EXPECT_SUCCESS(cert.initialize());
+
+    long serial = -1;
+    if (cert.get_cert()) {
+        serial = ASN1_INTEGER_get(X509_get_serialNumber(cert.get_cert()));
+    }
+
+    // Restore the stack members before any assertion, so the certificate never frees them.
+    cert.config_ = NULL;
+    cert.rand_ = NULL;
+
+    EXPECT_EQ(1, rand.integer_count_);
+    EXPECT_EQ(0x5a17c3e1, serial);
+}
+
+MockAppConfigForRtcBlackhole::MockAppConfigForRtcBlackhole()
+{
+    black_hole_ = false;
+    get_rtc_server_black_hole_count_ = 0;
+    get_rtc_server_black_hole_addr_count_ = 0;
+}
+
+MockAppConfigForRtcBlackhole::~MockAppConfigForRtcBlackhole()
+{
+}
+
+bool MockAppConfigForRtcBlackhole::get_rtc_server_black_hole()
+{
+    get_rtc_server_black_hole_count_++;
+    return black_hole_;
+}
+
+std::string MockAppConfigForRtcBlackhole::get_rtc_server_black_hole_addr()
+{
+    get_rtc_server_black_hole_addr_count_++;
+    return black_hole_addr_;
+}
+
+// The black hole captures the config global in the constructor.
+VOID TEST(RtcBlackholeTest, CapturesConfigInConstructor)
+{
+    SrsRtcBlackhole blackhole;
+    EXPECT_TRUE(blackhole.config_ != NULL);
+    EXPECT_TRUE(blackhole.config_ == (ISrsAppConfig *)_srs_config);
+}
+
+// The injected config disables the black hole, so the endpoint is not read and no socket is opened.
+VOID TEST(RtcBlackholeTest, InitializeDisabledFromInjectedConfig)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForRtcBlackhole config;
+    config.black_hole_ = false;
+    config.black_hole_addr_ = "127.0.0.1:10000";
+
+    SrsRtcBlackhole blackhole;
+    blackhole.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(blackhole.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_black_hole_count_);
+    EXPECT_EQ(0, config.get_rtc_server_black_hole_addr_count_);
+    EXPECT_FALSE(blackhole.blackhole_);
+    EXPECT_TRUE(blackhole.blackhole_addr_ == NULL);
+    EXPECT_TRUE(blackhole.blackhole_stfd_ == NULL);
+
+    blackhole.config_ = NULL;
+}
+
+// The injected config enables the black hole without an endpoint, so it is turned off again.
+VOID TEST(RtcBlackholeTest, InitializeWithoutEndpointDisables)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForRtcBlackhole config;
+    config.black_hole_ = true;
+
+    SrsRtcBlackhole blackhole;
+    blackhole.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(blackhole.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_black_hole_count_);
+    EXPECT_EQ(1, config.get_rtc_server_black_hole_addr_count_);
+    EXPECT_FALSE(blackhole.blackhole_);
+    EXPECT_TRUE(blackhole.blackhole_addr_ == NULL);
+    EXPECT_TRUE(blackhole.blackhole_stfd_ == NULL);
+
+    blackhole.config_ = NULL;
+}
+
+// The injected endpoint is where the black hole sends: a UDP receiver bound there gets the packet.
+VOID TEST(RtcBlackholeTest, SendtoReachesInjectedEndpoint)
+{
+    srs_error_t err = srs_success;
+
+    int receiver = socket(AF_INET, SOCK_DGRAM, 0);
+    ASSERT_TRUE(receiver >= 0);
+
+    sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = inet_addr("127.0.0.1");
+    local.sin_port = 0;
+    ASSERT_EQ(0, ::bind(receiver, (sockaddr *)&local, sizeof(local)));
+
+    socklen_t local_len = sizeof(local);
+    ASSERT_EQ(0, getsockname(receiver, (sockaddr *)&local, &local_len));
+    int port = ntohs(local.sin_port);
+
+    MockAppConfigForRtcBlackhole config;
+    config.black_hole_ = true;
+    config.black_hole_addr_ = "127.0.0.1:" + srs_strconv_format_int(port);
+
+    SrsRtcBlackhole blackhole;
+    blackhole.config_ = &config;
+
+    HELPER_EXPECT_SUCCESS(blackhole.initialize());
+    EXPECT_EQ(1, config.get_rtc_server_black_hole_count_);
+    EXPECT_EQ(1, config.get_rtc_server_black_hole_addr_count_);
+    EXPECT_TRUE(blackhole.blackhole_);
+    ASSERT_TRUE(blackhole.blackhole_addr_ != NULL);
+    EXPECT_EQ(inet_addr("127.0.0.1"), blackhole.blackhole_addr_->sin_addr.s_addr);
+    EXPECT_EQ(htons(port), blackhole.blackhole_addr_->sin_port);
+    EXPECT_TRUE(blackhole.blackhole_stfd_ != NULL);
+
+    char data[] = "plaintext";
+    blackhole.sendto(data, sizeof(data));
+
+    pollfd pfd;
+    pfd.fd = receiver;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+#ifdef _WIN32
+    EXPECT_EQ(1, WSAPoll(&pfd, 1, 1000));
+#else
+    EXPECT_EQ(1, poll(&pfd, 1, 1000));
+#endif
+
+    // Windows has no MSG_DONTWAIT; poll has said the packet is there.
+    char buf[64];
+#ifdef _WIN32
+    ssize_t nn = recv(receiver, buf, sizeof(buf), 0);
+#else
+    ssize_t nn = recv(receiver, buf, sizeof(buf), MSG_DONTWAIT);
+#endif
+    EXPECT_EQ((ssize_t)sizeof(data), nn);
+    if (nn == (ssize_t)sizeof(data)) {
+        EXPECT_STREQ("plaintext", buf);
+    }
+
+    srs_close_socket(receiver);
+    blackhole.config_ = NULL;
+}
+
+MockAppConfigForRtcPublishEdge::MockAppConfigForRtcPublishEdge()
+{
+    vhost_is_edge_ = false;
+    get_vhost_is_edge_count_ = 0;
+}
+
+MockAppConfigForRtcPublishEdge::~MockAppConfigForRtcPublishEdge()
+{
+}
+
+bool MockAppConfigForRtcPublishEdge::get_vhost_is_edge(std::string vhost)
+{
+    get_vhost_is_edge_count_++;
+    return vhost_is_edge_;
+}
+
+// The injected config marks the vhost as an edge, so WebRTC to RTMP is disabled: no bridge is set and
+// the GOP cache of the live source is kept. The global config has no edge vhost, so a read of the global
+// would create the bridge.
+VOID TEST(RtcPublishStreamTest, InitializeEdgeFromInjectedConfigDisablesRtcToRtmp)
+{
+    srs_error_t err;
+
+    MockAppStatistic mock_stat;
+    MockAppConfigForRtcPublishEdge mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockLiveSourceManager mock_live_sources;
+    MockSrtSourceManager mock_srt_sources;
+    MockRtcPacketReceiver mock_receiver;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockExpire mock_expire;
+
+    SrsContextId cid;
+    cid.set_value("test-publish-stream-edge");
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    publish_stream->stat_ = &mock_stat;
+    publish_stream->config_ = &mock_config;
+    publish_stream->rtc_sources_ = &mock_rtc_sources;
+    publish_stream->live_sources_ = &mock_live_sources;
+    publish_stream->srt_sources_ = &mock_srt_sources;
+
+    mock_config.set_rtc_to_rtmp(true);
+    mock_config.vhost_is_edge_ = true;
+
+    SrsUniquePtr<SrsRtcSourceDescription> stream_desc(new SrsRtcSourceDescription());
+
+    HELPER_EXPECT_SUCCESS(publish_stream->initialize(&mock_request, stream_desc.get()));
+
+    EXPECT_EQ(1, mock_config.get_vhost_is_edge_count_);
+    EXPECT_TRUE(mock_rtc_sources.mock_source_->rtc_bridge_ == NULL);
+    EXPECT_TRUE(mock_live_sources.mock_source_->gop_cache_->enabled());
+}
+
+// The injected config marks the vhost as an origin, so WebRTC to RTMP stays on: the bridge is set and
+// the GOP cache of the live source is disabled, with the edge switch read once from the injected config.
+VOID TEST(RtcPublishStreamTest, InitializeOriginFromInjectedConfigKeepsRtcToRtmp)
+{
+    srs_error_t err;
+
+    MockAppStatistic mock_stat;
+    MockAppConfigForRtcPublishEdge mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockLiveSourceManager mock_live_sources;
+    MockSrtSourceManager mock_srt_sources;
+    MockRtcPacketReceiver mock_receiver;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_exec;
+    MockExpire mock_expire;
+
+    SrsContextId cid;
+    cid.set_value("test-publish-stream-origin");
+    SrsUniquePtr<SrsRtcPublishStream> publish_stream(new SrsRtcPublishStream(&mock_exec, &mock_expire, &mock_receiver, cid));
+
+    publish_stream->stat_ = &mock_stat;
+    publish_stream->config_ = &mock_config;
+    publish_stream->rtc_sources_ = &mock_rtc_sources;
+    publish_stream->live_sources_ = &mock_live_sources;
+    publish_stream->srt_sources_ = &mock_srt_sources;
+
+    mock_config.set_rtc_to_rtmp(true);
+    mock_config.vhost_is_edge_ = false;
+
+    SrsUniquePtr<SrsRtcSourceDescription> stream_desc(new SrsRtcSourceDescription());
+
+    HELPER_EXPECT_SUCCESS(publish_stream->initialize(&mock_request, stream_desc.get()));
+
+    EXPECT_EQ(1, mock_config.get_vhost_is_edge_count_);
+    EXPECT_TRUE(mock_rtc_sources.mock_source_->rtc_bridge_ != NULL);
+    EXPECT_FALSE(mock_live_sources.mock_source_->gop_cache_->enabled());
+}
+
+MockDtlsCertificateForDtlsCtx::MockDtlsCertificateForDtlsCtx(bool ecdsa)
+{
+    config_.ecdsa_ = ecdsa;
+    real_ = new SrsDtlsCertificate();
+    real_->config_ = &config_;
+
+    get_cert_count_ = 0;
+    get_public_key_count_ = 0;
+    get_ecdsa_key_count_ = 0;
+    is_ecdsa_count_ = 0;
+}
+
+MockDtlsCertificateForDtlsCtx::~MockDtlsCertificateForDtlsCtx()
+{
+    real_->config_ = NULL;
+    srs_freep(real_);
+}
+
+srs_error_t MockDtlsCertificateForDtlsCtx::initialize()
+{
+    return real_->initialize();
+}
+
+X509 *MockDtlsCertificateForDtlsCtx::get_cert()
+{
+    get_cert_count_++;
+    return real_->get_cert();
+}
+
+EVP_PKEY *MockDtlsCertificateForDtlsCtx::get_public_key()
+{
+    get_public_key_count_++;
+    return real_->get_public_key();
+}
+
+EC_KEY *MockDtlsCertificateForDtlsCtx::get_ecdsa_key()
+{
+    get_ecdsa_key_count_++;
+    return real_->get_ecdsa_key();
+}
+
+std::string MockDtlsCertificateForDtlsCtx::get_fingerprint()
+{
+    return real_->get_fingerprint();
+}
+
+bool MockDtlsCertificateForDtlsCtx::is_ecdsa()
+{
+    is_ecdsa_count_++;
+    return real_->is_ecdsa();
+}
+
+// The context takes its certificate and key from the given certificate. The global
+// certificate is ECDSA by default, so an RSA one here tells the two apart.
+VOID TEST(DtlsCtxTest, BuildsWithGivenRsaCertificate)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(false);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SSL_CTX *ctx = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_2, "passive");
+    ASSERT_TRUE(ctx != NULL);
+
+    EXPECT_EQ(1, certificate.is_ecdsa_count_);
+    EXPECT_EQ(1, certificate.get_cert_count_);
+    EXPECT_EQ(1, certificate.get_public_key_count_);
+    EXPECT_TRUE(SSL_CTX_get0_certificate(ctx) == certificate.real_->get_cert());
+    EXPECT_TRUE(SSL_CTX_get0_certificate(ctx) != _srs_rtc_dtls_certificate->get_cert());
+
+    SSL_CTX_free(ctx);
+}
+
+// An ECDSA certificate takes the same path, asked once whether it is ECDSA.
+VOID TEST(DtlsCtxTest, BuildsWithGivenEcdsaCertificate)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(true);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SSL_CTX *ctx = srs_build_dtls_ctx(&certificate, SrsDtlsVersionAuto, "active");
+    ASSERT_TRUE(ctx != NULL);
+
+    EXPECT_EQ(1, certificate.is_ecdsa_count_);
+    EXPECT_EQ(1, certificate.get_cert_count_);
+    EXPECT_EQ(1, certificate.get_public_key_count_);
+    EXPECT_TRUE(SSL_CTX_get0_certificate(ctx) == certificate.real_->get_cert());
+
+    SSL_CTX_free(ctx);
+}
+
+// The DTLS implementation captures the global certificate in the constructor.
+VOID TEST(DtlsImplTest, ConstructorCapturesCertificate)
+{
+    SrsDtlsServerImpl server(NULL);
+    EXPECT_TRUE(server.dtls_certificate_ == (ISrsDtlsCertificate *)_srs_rtc_dtls_certificate);
+
+    SrsDtlsClientImpl client(NULL);
+    EXPECT_TRUE(client.dtls_certificate_ == (ISrsDtlsCertificate *)_srs_rtc_dtls_certificate);
+}
+
+// Initialize builds the context from the injected certificate.
+VOID TEST(DtlsImplTest, InitializeBuildsContextThroughCertificate)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(false);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SrsDtlsServerImpl impl(NULL);
+    impl.dtls_certificate_ = &certificate;
+
+    HELPER_EXPECT_SUCCESS(impl.initialize("dtls1.2", "passive"));
+    EXPECT_EQ(1, certificate.is_ecdsa_count_);
+    EXPECT_EQ(1, certificate.get_cert_count_);
+    EXPECT_EQ(1, certificate.get_public_key_count_);
+    ASSERT_TRUE(impl.dtls_ctx_ != NULL);
+    EXPECT_TRUE(SSL_CTX_get0_certificate(impl.dtls_ctx_) == certificate.real_->get_cert());
+
+    impl.dtls_certificate_ = NULL;
+}
+
+static void utest_dtls_move(BIO *from, BIO *to)
+{
+    char buf[4096];
+    int nn;
+    while ((nn = BIO_read(from, buf, sizeof(buf))) > 0) {
+        BIO_write(to, buf, nn);
+    }
+}
+
+// A DTLS handshake between the two contexts through memory BIOs, as SRS feeds its UDP packets.
+// Returns the version both sides agreed on, or 0 when it did not finish.
+static int utest_dtls_handshake(SSL_CTX *client_ctx, SSL_CTX *server_ctx)
+{
+    SSL *client = SSL_new(client_ctx);
+    SSL *server = SSL_new(server_ctx);
+    BIO *client_in = BIO_new(BIO_s_mem());
+    BIO *client_out = BIO_new(BIO_s_mem());
+    BIO *server_in = BIO_new(BIO_s_mem());
+    BIO *server_out = BIO_new(BIO_s_mem());
+    SSL_set_bio(client, client_in, client_out);
+    SSL_set_bio(server, server_in, server_out);
+    SSL_set_connect_state(client);
+    SSL_set_accept_state(server);
+
+    SSL *peers[] = {client, server};
+    for (int i = 0; i < 2; i++) {
+        SSL_set_options(peers[i], SSL_OP_NO_QUERY_MTU);
+        SSL_set_mtu(peers[i], 1200);
+        DTLS_set_link_mtu(peers[i], 1200);
+    }
+
+    for (int i = 0; i < 32 && (!SSL_is_init_finished(client) || !SSL_is_init_finished(server)); i++) {
+        SSL_do_handshake(client);
+        utest_dtls_move(client_out, server_in);
+        SSL_do_handshake(server);
+        utest_dtls_move(server_out, client_in);
+    }
+
+    int version = 0;
+    if (SSL_is_init_finished(client) && SSL_is_init_finished(server) && SSL_version(client) == SSL_version(server)) {
+        version = SSL_version(client);
+    }
+
+    SSL_free(client);
+    SSL_free(server);
+    return version;
+}
+
+// dtls_version dtls1.0 on both sides completes a DTLS 1.0 handshake. OpenSSL 3 refuses DTLS 1.0 at
+// its default security level, so this is red there without a lower level for that context.
+VOID TEST(DtlsCtxTest, Dtls10HandshakeWithEcdsaCertificate)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(true);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SSL_CTX *client = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, "active");
+    SSL_CTX *server = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, "passive");
+    ASSERT_TRUE(client != NULL);
+    ASSERT_TRUE(server != NULL);
+
+    EXPECT_EQ(DTLS1_VERSION, utest_dtls_handshake(client, server));
+
+    SSL_CTX_free(client);
+    SSL_CTX_free(server);
+}
+
+VOID TEST(DtlsCtxTest, Dtls10HandshakeWithRsaCertificate)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(false);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SSL_CTX *client = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, "active");
+    SSL_CTX *server = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, "passive");
+    ASSERT_TRUE(client != NULL);
+    ASSERT_TRUE(server != NULL);
+
+    EXPECT_EQ(DTLS1_VERSION, utest_dtls_handshake(client, server));
+
+    SSL_CTX_free(client);
+    SSL_CTX_free(server);
+}
+
+// The default auto and dtls1.2 keep OpenSSL's default security level, and agree on DTLS 1.2.
+VOID TEST(DtlsCtxTest, AutoAndDtls12KeepTheDefaultSecurityLevel)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(true);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    SSL_CTX *defaults = SSL_CTX_new(DTLS_method());
+    SSL_CTX *client = srs_build_dtls_ctx(&certificate, SrsDtlsVersionAuto, "active");
+    SSL_CTX *server = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_2, "passive");
+    ASSERT_TRUE(defaults != NULL);
+    ASSERT_TRUE(client != NULL);
+    ASSERT_TRUE(server != NULL);
+
+    EXPECT_EQ(SSL_CTX_get_security_level(defaults), SSL_CTX_get_security_level(client));
+    EXPECT_EQ(SSL_CTX_get_security_level(defaults), SSL_CTX_get_security_level(server));
+    EXPECT_EQ(DTLS1_2_VERSION, utest_dtls_handshake(client, server));
+
+    SSL_CTX_free(defaults);
+    SSL_CTX_free(client);
+    SSL_CTX_free(server);
+}
+
+// The security level 1 suite checks: no anonymous suite, no MD5 MAC, and no cipher below 80 bits. A dtls1.0
+// context runs at level 0 on OpenSSL 3, which allows them all, so its cipher list must leave them out.
+VOID TEST(DtlsCtxTest, Dtls10OffersOnlyLevelOneSuites)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(true);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    const char *roles[] = {"active", "passive"};
+    for (int i = 0; i < 2; i++) {
+        SSL_CTX *ctx = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, roles[i]);
+        ASSERT_TRUE(ctx != NULL);
+        SSL *ssl = SSL_new(ctx);
+        STACK_OF(SSL_CIPHER) *ciphers = SSL_get1_supported_ciphers(ssl);
+        ASSERT_TRUE(ciphers != NULL);
+        EXPECT_GT(sk_SSL_CIPHER_num(ciphers), 0);
+
+        for (int j = 0; j < sk_SSL_CIPHER_num(ciphers); j++) {
+            const SSL_CIPHER *cipher = sk_SSL_CIPHER_value(ciphers, j);
+            EXPECT_NE(NID_auth_null, SSL_CIPHER_get_auth_nid(cipher)) << roles[i] << " " << SSL_CIPHER_get_name(cipher);
+            EXPECT_NE(NID_md5, SSL_CIPHER_get_digest_nid(cipher)) << roles[i] << " " << SSL_CIPHER_get_name(cipher);
+            EXPECT_GE(SSL_CIPHER_get_bits(cipher, NULL), 80) << roles[i] << " " << SSL_CIPHER_get_name(cipher);
+        }
+
+        sk_SSL_CIPHER_free(ciphers);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+    }
+}
+
+// A DTLS 1.0 client that offers only anonymous suites gets no handshake from a dtls1.0 server.
+VOID TEST(DtlsCtxTest, Dtls10RefusesAnAnonymousSuite)
+{
+    srs_error_t err = srs_success;
+
+    MockDtlsCertificateForDtlsCtx certificate(true);
+    HELPER_ASSERT_SUCCESS(certificate.initialize());
+
+    // The client allows them at level 0, so it really offers them.
+    SSL_CTX *client = SSL_CTX_new(DTLS_client_method());
+    ASSERT_TRUE(client != NULL);
+    SSL_CTX_set_security_level(client, 0);
+    SSL_CTX_set_max_proto_version(client, DTLS1_VERSION);
+    ASSERT_EQ(1, SSL_CTX_set_cipher_list(client, "aNULL"));
+
+    SSL *offer = SSL_new(client);
+    STACK_OF(SSL_CIPHER) *offered = SSL_get1_supported_ciphers(offer);
+    ASSERT_TRUE(offered != NULL);
+    EXPECT_GT(sk_SSL_CIPHER_num(offered), 0);
+    sk_SSL_CIPHER_free(offered);
+    SSL_free(offer);
+
+    SSL_CTX *server = srs_build_dtls_ctx(&certificate, SrsDtlsVersion1_0, "passive");
+    ASSERT_TRUE(server != NULL);
+
+    EXPECT_EQ(0, utest_dtls_handshake(client, server));
+
+    SSL_CTX_free(client);
+    SSL_CTX_free(server);
+}
+
+// A packet of n payload bytes, at an RTP time and a time in ms on the publisher's clock, -1 when not mapped.
+static SrsRtpPacket *mock_rtp_packet_for_sr(uint32_t ssrc, uint16_t seq, uint32_t ts, int64_t avsync_time, int n)
+{
+    SrsRtpPacket *pkt = new SrsRtpPacket();
+    pkt->header_.set_ssrc(ssrc);
+    pkt->header_.set_sequence(seq);
+    pkt->header_.set_timestamp(ts);
+    pkt->set_avsync_time(avsync_time);
+
+    SrsRtpRawPayload *raw = new SrsRtpRawPayload();
+    raw->payload_ = pkt->wrap(n);
+    memset(raw->payload_, 0x01, n);
+    raw->nn_payload_ = n;
+    pkt->set_payload(raw, SrsRtpPacketPayloadTypeRaw);
+    return pkt;
+}
+
+// Decode the Sender Reports a mock sender got.
+static std::vector<SrsRtcpSR *> mock_decode_srs(MockRtcPacketSender &sender)
+{
+    std::vector<SrsRtcpSR *> srs;
+    for (size_t i = 0; i < sender.sent_rtcps_.size(); i++) {
+        std::string &b = sender.sent_rtcps_[i];
+        SrsBuffer buf((char *)b.data(), (int)b.size());
+        SrsRtcpSR *sr = new SrsRtcpSR();
+        srs_error_t err = sr->decode(&buf);
+        if (err != srs_success || sr->type() != SrsRtcpType_sr) {
+            srs_freep(err);
+            srs_freep(sr);
+            continue;
+        }
+        srs.push_back(sr);
+    }
+    return srs;
+}
+
+// The sender info counts every packet sent, but fills a Sender Report only after a packet on the publisher's clock,
+// with the RTP time and publisher time of the last such packet, and then not again until a new one.
+VOID TEST(RtcSenderInfoTest, FillsLastMappedPacket)
+{
+    SrsRtcSenderInfo info;
+    SrsRtcpSR sr0;
+    EXPECT_FALSE(info.fill(&sr0));
+
+    // A packet the publisher's reports don't map: counted, nothing to fill.
+    SrsUniquePtr<SrsRtpPacket> pkt0(mock_rtp_packet_for_sr(1234, 100, 48000, -1, 50));
+    info.on_packet(pkt0.get());
+    SrsRtcpSR sr1;
+    EXPECT_FALSE(info.fill(&sr1));
+
+    // Two mapped packets: filled with the times of the last.
+    SrsUniquePtr<SrsRtpPacket> pkt1(mock_rtp_packet_for_sr(1234, 101, 48960, 7020, 60));
+    info.on_packet(pkt1.get());
+    SrsUniquePtr<SrsRtpPacket> pkt2(mock_rtp_packet_for_sr(1234, 102, 49920, 7040, 70));
+    info.on_packet(pkt2.get());
+
+    SrsRtcpSR sr2;
+    EXPECT_TRUE(info.fill(&sr2));
+    EXPECT_EQ(SrsNtp::from_time_ms(7040).ntp_, sr2.get_ntp());
+    EXPECT_EQ(49920u, sr2.get_rtp_ts());
+    EXPECT_EQ(3u, sr2.get_rtp_send_packets());
+    EXPECT_EQ(180u, sr2.get_rtp_send_bytes());
+
+    // Filled, so nothing until a new mapped packet.
+    SrsRtcpSR sr3;
+    EXPECT_FALSE(info.fill(&sr3));
+    SrsUniquePtr<SrsRtpPacket> pkt3(mock_rtp_packet_for_sr(1234, 103, 50880, 7060, 80));
+    info.on_packet(pkt3.get());
+    SrsRtcpSR sr4;
+    EXPECT_TRUE(info.fill(&sr4));
+    EXPECT_EQ(4u, sr4.get_rtp_send_packets());
+}
+
+// The Sender Report of a track maps the RTP time of the last packet sent, as the player got it, to that packet's
+// time on the publisher's clock, which the publisher's own Sender Reports map, so the player syncs the tracks as
+// the publisher does; it counts the packets and payload octets sent.
+VOID TEST(RtcSendTrackTest, SenderReportMapsPublisherClock)
+{
+    srs_error_t err;
+
+    MockRtcPacketSender sender;
+    SrsRtcTrackDescription desc;
+    desc.type_ = "video";
+    desc.ssrc_ = 67890;
+    desc.is_active_ = true;
+
+    SrsRtcVideoSendTrack track(&sender, &desc);
+    track.assemble();
+
+    SrsUniquePtr<SrsRtpPacket> pkt0(mock_rtp_packet_for_sr(1234, 100, 90000, 5000, 100));
+    HELPER_EXPECT_SUCCESS(track.on_rtp(pkt0.get()));
+    SrsUniquePtr<SrsRtpPacket> pkt1(mock_rtp_packet_for_sr(1234, 101, 93600, 5040, 200));
+    HELPER_EXPECT_SUCCESS(track.on_rtp(pkt1.get()));
+    ASSERT_EQ(2, sender.send_packet_count_);
+
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+
+    std::vector<SrsRtcpSR *> srs = mock_decode_srs(sender);
+    ASSERT_EQ(1, (int)srs.size());
+    SrsUniquePtr<SrsRtcpSR> sr(srs[0]);
+    EXPECT_EQ(67890u, sr->get_ssrc());
+    EXPECT_EQ(SrsNtp::from_time_ms(5040).ntp_, sr->get_ntp());
+    // The RTP time as the player got it, after the track rebuilt it.
+    EXPECT_EQ(pkt1->header_.get_timestamp(), sr->get_rtp_ts());
+    EXPECT_EQ(pkt0->header_.get_timestamp() + 3600, sr->get_rtp_ts());
+    EXPECT_EQ(2u, sr->get_rtp_send_packets());
+    EXPECT_EQ(300u, sr->get_rtp_send_bytes());
+}
+
+// A track sends no Sender Report before it sent a packet on the publisher's clock, such as a stream converted from
+// RTMP, whose packets SRS doesn't map, and none again until it sent a new one.
+VOID TEST(RtcSendTrackTest, SenderReportOnlyAfterMappedPacket)
+{
+    srs_error_t err;
+
+    MockRtcPacketSender sender;
+    SrsRtcTrackDescription desc;
+    desc.type_ = "audio";
+    desc.ssrc_ = 12345;
+    desc.is_active_ = true;
+
+    SrsRtcAudioSendTrack track(&sender, &desc);
+    track.assemble();
+
+    // Nothing sent yet.
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+    EXPECT_EQ(0, (int)sender.sent_rtcps_.size());
+
+    // A packet the publisher's reports don't map.
+    SrsUniquePtr<SrsRtpPacket> pkt0(mock_rtp_packet_for_sr(1234, 100, 48000, -1, 50));
+    HELPER_EXPECT_SUCCESS(track.on_rtp(pkt0.get()));
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+    EXPECT_EQ(0, (int)sender.sent_rtcps_.size());
+
+    // A mapped packet: a report, which counts every packet sent.
+    SrsUniquePtr<SrsRtpPacket> pkt1(mock_rtp_packet_for_sr(1234, 101, 48960, 7020, 60));
+    HELPER_EXPECT_SUCCESS(track.on_rtp(pkt1.get()));
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+    ASSERT_EQ(1, (int)sender.sent_rtcps_.size());
+
+    // No new packet: no new report.
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+    EXPECT_EQ(1, (int)sender.sent_rtcps_.size());
+
+    // A new packet: a new report.
+    SrsUniquePtr<SrsRtpPacket> pkt2(mock_rtp_packet_for_sr(1234, 102, 49920, 7040, 70));
+    HELPER_EXPECT_SUCCESS(track.on_rtp(pkt2.get()));
+    HELPER_EXPECT_SUCCESS(track.send_rtcp_sr());
+
+    std::vector<SrsRtcpSR *> srs = mock_decode_srs(sender);
+    ASSERT_EQ(2, (int)srs.size());
+    SrsUniquePtr<SrsRtcpSR> sr0(srs[0]);
+    SrsUniquePtr<SrsRtcpSR> sr1(srs[1]);
+    EXPECT_EQ(SrsNtp::from_time_ms(7020).ntp_, sr0->get_ntp());
+    EXPECT_EQ(pkt1->header_.get_timestamp(), sr0->get_rtp_ts());
+    EXPECT_EQ(2u, sr0->get_rtp_send_packets());
+    EXPECT_EQ(110u, sr0->get_rtp_send_bytes());
+    EXPECT_EQ(SrsNtp::from_time_ms(7040).ntp_, sr1->get_ntp());
+    EXPECT_EQ(pkt2->header_.get_timestamp(), sr1->get_rtp_ts());
+    EXPECT_EQ(3u, sr1->get_rtp_send_packets());
+    EXPECT_EQ(180u, sr1->get_rtp_send_bytes());
+}
+
+// The play stream subscribes to the 1s timer when it initializes, and at each tick after it started sends the
+// Sender Report of each track; it unsubscribes when freed.
+VOID TEST(RtcPlayStreamTest, TimerSendsSenderReports)
+{
+    srs_error_t err;
+
+    MockAppConfig mock_config;
+    MockRtcSourceManager mock_rtc_sources;
+    MockAppStatistic mock_stat;
+    MockRtcAsyncCallRequest mock_request("test.vhost", "live", "stream1");
+    MockRtcAsyncTaskExecutor mock_async_executor;
+    MockExpire mock_expire;
+    MockRtcPacketSender mock_packet_sender;
+    MockSharedTimerForCircuitBreaker mock_timer;
+
+    SrsContextId cid;
+    cid.set_value("test-play-stream-sr-cid");
+    SrsRtcPlayStream *play_stream = new SrsRtcPlayStream(&mock_async_executor, &mock_expire, &mock_packet_sender, cid);
+    play_stream->config_ = &mock_config;
+    play_stream->rtc_sources_ = &mock_rtc_sources;
+    play_stream->stat_ = &mock_stat;
+    play_stream->shared_timer_ = &mock_timer;
+
+    SrsUniquePtr<SrsRtcTrackDescription> audio_desc(new SrsRtcTrackDescription());
+    audio_desc->type_ = "audio";
+    audio_desc->id_ = "audio-track-id";
+    audio_desc->ssrc_ = 12345;
+    audio_desc->is_active_ = true;
+
+    SrsUniquePtr<SrsRtcTrackDescription> video_desc(new SrsRtcTrackDescription());
+    video_desc->type_ = "video";
+    video_desc->id_ = "video-track-id";
+    video_desc->ssrc_ = 67890;
+    video_desc->is_active_ = true;
+
+    std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+    sub_relations[12345] = audio_desc.get();
+    sub_relations[67890] = video_desc.get();
+
+    HELPER_EXPECT_SUCCESS(play_stream->initialize(&mock_request, sub_relations));
+    EXPECT_TRUE(mock_timer.timer1s_->subscribed_handler_ == (ISrsFastTimerHandler *)play_stream);
+
+    SrsUniquePtr<SrsRtpPacket> audio(mock_rtp_packet_for_sr(1111, 100, 48000, 5000, 50));
+    HELPER_EXPECT_SUCCESS(play_stream->audio_tracks_[12345]->on_rtp(audio.get()));
+    SrsUniquePtr<SrsRtpPacket> video(mock_rtp_packet_for_sr(2222, 200, 90000, 5000, 100));
+    HELPER_EXPECT_SUCCESS(play_stream->video_tracks_[67890]->on_rtp(video.get()));
+
+    // Not started: no report.
+    HELPER_EXPECT_SUCCESS(play_stream->on_timer(1 * SRS_UTIME_SECONDS));
+    EXPECT_EQ(0, (int)mock_packet_sender.sent_rtcps_.size());
+
+    // Started: a report of each track.
+    play_stream->is_started_ = true;
+    HELPER_EXPECT_SUCCESS(play_stream->on_timer(1 * SRS_UTIME_SECONDS));
+
+    std::vector<SrsRtcpSR *> srs = mock_decode_srs(mock_packet_sender);
+    ASSERT_EQ(2, (int)srs.size());
+    SrsUniquePtr<SrsRtcpSR> sr0(srs[0]);
+    SrsUniquePtr<SrsRtcpSR> sr1(srs[1]);
+    std::set<uint32_t> ssrcs;
+    ssrcs.insert(sr0->get_ssrc());
+    ssrcs.insert(sr1->get_ssrc());
+    EXPECT_TRUE(ssrcs.count(12345) == 1);
+    EXPECT_TRUE(ssrcs.count(67890) == 1);
+    EXPECT_EQ(SrsNtp::from_time_ms(5000).ntp_, sr0->get_ntp());
+    EXPECT_EQ(SrsNtp::from_time_ms(5000).ntp_, sr1->get_ntp());
+
+    ISrsFastTimerHandler *handler = play_stream;
+    srs_freep(play_stream);
+    EXPECT_TRUE(mock_timer.timer1s_->unsubscribed_handler_ == handler);
+}
+
+// A track description of a play stream test, with its payload type as the publisher's too.
+static SrsRtcTrackDescription *play_subscribe_track_desc(std::string type, uint32_t ssrc, uint8_t pt)
+{
+    SrsRtcTrackDescription *desc = new SrsRtcTrackDescription();
+    desc->type_ = type;
+    desc->id_ = type + "-track-id";
+    desc->ssrc_ = ssrc;
+    desc->is_active_ = true;
+    desc->media_ = new SrsCodecPayload();
+    desc->media_->pt_ = pt;
+    desc->media_->pt_of_publisher_ = pt;
+    return desc;
+}
+
+// The play stream of a subscribe test: answered with audio 12345 and video 67890, its PLI worker
+// a mock, and its coroutine one that ends the cycle right after the consumer is made.
+class PlaySubscribeFixture
+{
+public:
+    MockAppConfig config_;
+    MockRtcSourceManager rtc_sources_;
+    MockAppStatistic stat_;
+    MockRtcAsyncCallRequest request_;
+    MockRtcAsyncTaskExecutor exec_;
+    MockExpire expire_;
+    MockRtcPacketSender sender_;
+    SrsUniquePtr<SrsRtcTrackDescription> audio_desc_;
+    SrsUniquePtr<SrsRtcTrackDescription> video_desc_;
+    MockRtcPublishStream publisher_;
+    SrsRtcPlayStream *play_stream_;
+    MockRtcPliWorker *pli_worker_;
+    SrsContextId cid_;
+
+public:
+    PlaySubscribeFixture()
+        : request_("test.vhost", "live", "stream1"),
+          audio_desc_(play_subscribe_track_desc("audio", 12345, 111)),
+          video_desc_(play_subscribe_track_desc("video", 67890, 96))
+    {
+        cid_.set_value("test-subscribe-cid");
+        play_stream_ = new SrsRtcPlayStream(&exec_, &expire_, &sender_, cid_);
+        play_stream_->config_ = &config_;
+        play_stream_->rtc_sources_ = &rtc_sources_;
+        play_stream_->stat_ = &stat_;
+
+        pli_worker_ = new MockRtcPliWorker(play_stream_);
+        srs_freep(play_stream_->pli_worker_);
+        play_stream_->pli_worker_ = pli_worker_;
+
+        MockCoroutineForCycle *trd = new MockCoroutineForCycle();
+        trd->pull_error_ = srs_error_new(ERROR_THREAD_INTERRUPED, "interrupted");
+        srs_freep(play_stream_->trd_);
+        play_stream_->trd_ = trd;
+    }
+    virtual ~PlaySubscribeFixture()
+    {
+        rtc_sources_.mock_source_->set_publish_stream(NULL);
+        srs_freep(play_stream_);
+    }
+
+public:
+    srs_error_t initialize()
+    {
+        std::map<uint32_t, SrsRtcTrackDescription *> sub_relations;
+        sub_relations[12345] = audio_desc_.get();
+        sub_relations[67890] = video_desc_.get();
+        return play_stream_->initialize(&request_, sub_relations);
+    }
+};
+
+// A publisher that starts after the player is answered, but before the player's consumer is made,
+// changes the stream with no consumer to tell. The player must take the publisher's SSRCs when it
+// subscribes, and ask for a keyframe as a stream change does, or its keyframe requests and the
+// publisher's packets find no track.
+VOID TEST(RtcPlayStreamTest, SubscribeAfterPublishTakesPublisherTracks)
+{
+    srs_error_t err;
+
+    PlaySubscribeFixture f;
+    HELPER_EXPECT_SUCCESS(f.initialize());
+    f.pli_worker_->reset();
+
+    SrsUniquePtr<SrsRtcSourceDescription> publisher(new SrsRtcSourceDescription());
+    publisher->audio_track_desc_ = play_subscribe_track_desc("audio", 54321, 111);
+    publisher->video_track_descs_.push_back(play_subscribe_track_desc("video", 98765, 96));
+    f.rtc_sources_.mock_source_->set_stream_desc(publisher.get());
+    f.rtc_sources_.mock_source_->set_publish_stream(&f.publisher_);
+
+    HELPER_EXPECT_FAILED(f.play_stream_->cycle());
+
+    EXPECT_EQ(1, (int)f.play_stream_->audio_tracks_.size());
+    EXPECT_TRUE(f.play_stream_->audio_tracks_.find(54321) != f.play_stream_->audio_tracks_.end());
+    EXPECT_EQ(1, (int)f.play_stream_->video_tracks_.size());
+    EXPECT_TRUE(f.play_stream_->video_tracks_.find(98765) != f.play_stream_->video_tracks_.end());
+    EXPECT_EQ(98765u, f.play_stream_->get_video_publish_ssrc(67890));
+
+    EXPECT_EQ(2, f.pli_worker_->get_keyframe_request_count());
+    EXPECT_TRUE(f.pli_worker_->has_keyframe_request(54321, f.cid_));
+    EXPECT_TRUE(f.pli_worker_->has_keyframe_request(98765, f.cid_));
+}
+
+// A player answered with the publisher's tracks subscribes to the same stream: nothing changes,
+// and it asks for no keyframe.
+VOID TEST(RtcPlayStreamTest, SubscribeToTheSameStreamKeepsTracks)
+{
+    srs_error_t err;
+
+    PlaySubscribeFixture f;
+    HELPER_EXPECT_SUCCESS(f.initialize());
+    f.pli_worker_->reset();
+
+    SrsUniquePtr<SrsRtcSourceDescription> publisher(new SrsRtcSourceDescription());
+    publisher->audio_track_desc_ = play_subscribe_track_desc("audio", 12345, 111);
+    publisher->video_track_descs_.push_back(play_subscribe_track_desc("video", 67890, 96));
+    f.rtc_sources_.mock_source_->set_stream_desc(publisher.get());
+    f.rtc_sources_.mock_source_->set_publish_stream(&f.publisher_);
+
+    HELPER_EXPECT_FAILED(f.play_stream_->cycle());
+
+    EXPECT_TRUE(f.play_stream_->audio_tracks_.find(12345) != f.play_stream_->audio_tracks_.end());
+    EXPECT_TRUE(f.play_stream_->video_tracks_.find(67890) != f.play_stream_->video_tracks_.end());
+    EXPECT_EQ(0, f.pli_worker_->get_keyframe_request_count());
+}
+
+// With no WebRTC publisher, such as a play before publishing or a stream from RTMP, no publisher
+// changed the stream, so the tracks stay as answered, whatever the source describes.
+VOID TEST(RtcPlayStreamTest, SubscribeWithNoPublisherKeepsTracks)
+{
+    srs_error_t err;
+
+    PlaySubscribeFixture f;
+    HELPER_EXPECT_SUCCESS(f.initialize());
+    f.pli_worker_->reset();
+
+    SrsUniquePtr<SrsRtcSourceDescription> other(new SrsRtcSourceDescription());
+    other->audio_track_desc_ = play_subscribe_track_desc("audio", 54321, 111);
+    other->video_track_descs_.push_back(play_subscribe_track_desc("video", 98765, 96));
+    f.rtc_sources_.mock_source_->set_stream_desc(other.get());
+
+    HELPER_EXPECT_FAILED(f.play_stream_->cycle());
+
+    EXPECT_TRUE(f.play_stream_->audio_tracks_.find(12345) != f.play_stream_->audio_tracks_.end());
+    EXPECT_TRUE(f.play_stream_->video_tracks_.find(67890) != f.play_stream_->video_tracks_.end());
+    EXPECT_EQ(0, f.pli_worker_->get_keyframe_request_count());
+}

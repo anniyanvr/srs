@@ -1,25 +1,8 @@
-/**
- * The MIT License (MIT)
- *
- * Copyright (c) 2013-2020 Winlin
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of
- * this software and associated documentation files (the "Software"), to deal in
- * the Software without restriction, including without limitation the rights to
- * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- * the Software, and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all
- * copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
- * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
- * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
- * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
 
 #ifndef SRS_APP_LOG_HPP
 #define SRS_APP_LOG_HPP
@@ -30,46 +13,81 @@
 #include <string>
 
 #include <srs_app_reload.hpp>
-#include <srs_service_log.hpp>
+#include <srs_protocol_log.hpp>
+
+class ISrsAppConfig;
+
+// The output operations of the file logger, the log file and the console. A narrow seam over the system calls, so a
+// test can drive the logger and read back what it wrote without opening a file or writing to the terminal.
+class ISrsLogWriter
+{
+public:
+    ISrsLogWriter();
+    virtual ~ISrsLogWriter();
+
+public:
+    // Open path for append, return the descriptor, or a negative value when it cannot be opened.
+    virtual int open_file(const std::string &path) = 0;
+    // Close a descriptor returned by open_file().
+    virtual void close_file(int fd) = 0;
+    // Write size bytes of str_log to fd.
+    virtual void write_file(int fd, const char *str_log, int size) = 0;
+    // Write size bytes of str_log to the console, wrapped in the shell color code when color is not empty.
+    virtual void write_console(const char *color, const char *str_log, int size) = 0;
+};
+
+// Write the log to the real log file and the real console.
+class SrsLogWriter : public ISrsLogWriter
+{
+public:
+    SrsLogWriter();
+    virtual ~SrsLogWriter();
+    // Interface ISrsLogWriter
+public:
+    virtual int open_file(const std::string &path);
+    virtual void close_file(int fd);
+    virtual void write_file(int fd, const char *str_log, int size);
+    virtual void write_console(const char *color, const char *str_log, int size);
+};
 
 // Use memory/disk cache and donot flush when write log.
 // it's ok to use it without config, which will log to console, and default trace level.
-// when you want to use different level, override this classs, set the protected _level.
-class SrsFastLog : public ISrsLog, public ISrsReloadHandler
+// when you want to use different level, override this classs, set the protected level_.
+class SrsFileLog : public ISrsLog, public ISrsReloadHandler
 {
-private:
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
     // Defined in SrsLogLevel.
-    SrsLogLevel level;
-private:
-    char* log_data;
+    SrsLogLevel level_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    char *log_data_;
     // Log to file if specified srs_log_file
-    int fd;
+    int fd_;
     // Whether log to file tank
-    bool log_to_file_tank;
+    bool log_to_file_tank_;
     // Whether use utc time.
-    bool utc;
+    bool utc_;
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    ISrsAppConfig *config_;
+    ISrsLogWriter *writer_;
+
 public:
-    SrsFastLog();
-    virtual ~SrsFastLog();
-// Interface ISrsLog
+    SrsFileLog();
+    virtual ~SrsFileLog();
+    // Interface ISrsLog
 public:
     virtual srs_error_t initialize();
     virtual void reopen();
-    virtual void verbose(const char* tag, int context_id, const char* fmt, ...);
-    virtual void info(const char* tag, int context_id, const char* fmt, ...);
-    virtual void trace(const char* tag, int context_id, const char* fmt, ...);
-    virtual void warn(const char* tag, int context_id, const char* fmt, ...);
-    virtual void error(const char* tag, int context_id, const char* fmt, ...);
-// Interface ISrsReloadHandler.
-public:
-    virtual srs_error_t on_reload_utc_time();
-    virtual srs_error_t on_reload_log_tank();
-    virtual srs_error_t on_reload_log_level();
-    virtual srs_error_t on_reload_log_file();
-private:
-    virtual void write_log(int& fd, char* str_log, int size, int level);
+    virtual void log(SrsLogLevel level, const char *tag, const SrsContextId &context_id, const char *fmt, va_list args);
+
+// clang-format off
+SRS_DECLARE_PRIVATE: // clang-format on
+    virtual void write_log(int &fd, char *str_log, int size, int level);
     virtual void open_log_file();
 };
 
 #endif
-

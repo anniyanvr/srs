@@ -1,0 +1,2400 @@
+//
+// Copyright (c) 2013-2026 The SRS Authors
+//
+// SPDX-License-Identifier: MIT
+//
+#include <srs_utest_ai25.hpp>
+
+using namespace std;
+
+#include <set>
+
+#include <srs_app_config.hpp>
+#include <srs_app_http_conn.hpp>
+#include <srs_app_http_hooks.hpp>
+#include <srs_app_http_static.hpp>
+#include <srs_app_http_stream.hpp>
+#include <srs_app_rtc_api.hpp>
+#include <srs_app_rtc_source.hpp>
+#include <srs_app_rtmp_conn.hpp>
+#include <srs_app_rtsp_conn.hpp>
+#include <srs_app_rtsp_source.hpp>
+#include <srs_app_srt_conn.hpp>
+#include <srs_app_statistic.hpp>
+#include <srs_kernel_error.hpp>
+#include <srs_protocol_amf0.hpp>
+#include <srs_protocol_json.hpp>
+#include <srs_utest_ai15.hpp>
+#include <srs_utest_ai16.hpp>
+#include <srs_utest_ai17.hpp>
+#include <srs_utest_ai18.hpp>
+#include <srs_utest_ai22.hpp>
+#include <srs_utest_manual_http.hpp>
+#include <srs_utest_manual_kernel.hpp>
+#include <srs_utest_manual_mock.hpp>
+#include <srs_utest_manual_service.hpp>
+
+// Goal tests for hook rejection across every protocol, for both players and publishers.
+//
+// An on_play or on_publish hook rejects a client by returning a non-zero application code. Both
+// hooks share one implementation - SrsHttpHooks::do_post - so a rejection reaches every protocol
+// as the same ERROR_RESPONSE_CODE. Every protocol already blocks the client; what differs is how
+// much of the reason reaches them. These tests state the INTENDED behavior, so the ones covering
+// paths that still need work are expected to FAIL until that work lands. They are the
+// specification for the change, not a record of today's behavior.
+//
+// WHIP publish is the reference implementation: SrsGoApiRtcPublish::serve_http() converts a hook
+// rejection with srs_error_transform(ERROR_SYSTEM_AUTH, ...), which SrsGoApiRtcWhip::serve_http()
+// maps to 401. The play path a few hundred lines above uses srs_error_wrap() instead, which is the
+// entire reason WHEP answers 500. Keep the WHIP test passing; it guards behavior that already works.
+//
+// SRT publish is not covered separately: it is the same accepted limitation as SRT play, on the
+// same transport with no status channel, so a second test would assert nothing new.
+//
+// The RTSP goal test lives in srs_utest_ai22.cpp because RTSP sources only build with --rtsp=on.
+// RTSP and the HTTP playback protocols have no publish path in SRS, so they are play-only here.
+
+// The application code a hook returns to reject an unauthorized client.
+#define MOCK_HOOK_REJECT_STATUS 401
+
+// HTTP-FLV: a rejected viewer must receive the hook's status, not a silently closed connection.
+//
+// Today SrsLiveStream::serve_http_impl() returns the hook error without writing anything to the
+// response writer, so the player observes a dropped TCP connection that is indistinguishable from
+// a crash or a network failure.
+VOID TEST(HookRejectionTest, HttpFlvRejectedViewerReceivesHookStatus)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockHttpMessageForLiveStream> message(new MockHttpMessageForLiveStream());
+    MockResponseWriter writer;
+    MockRequest request("test.vhost", "live", "stream1");
+    MockBufferCache cache;
+    MockStatisticForLiveStream stat;
+    MockSecurity security;
+
+    // Enable the on_play hook for this vhost.
+    MockAppConfigForLiveStreamHooks config;
+    config.http_hooks_enabled_ = true;
+    config.on_play_directive_ = new SrsConfDirective();
+    config.on_play_directive_->name_ = "on_play";
+    config.on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    // The hook rejects this viewer as unauthorized.
+    MockHttpHooksForLiveStream hooks;
+    hooks.on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsLiveStream stream(&request, &cache);
+    stream.stat_ = &stat;
+    srs_freep(stream.security_);
+    stream.security_ = &security;
+    stream.config_ = &config;
+    stream.hooks_ = &hooks;
+    stream.entry_ = new SrsHttpMuxEntry();
+    stream.entry_->enabled = false;
+
+    err = stream.serve_http(&writer, message.get());
+
+    // The hook must have been consulted and the playback rejected.
+    EXPECT_EQ(1, hooks.on_play_count_);
+    EXPECT_TRUE(stream.viewers_.empty());
+
+    // GOAL: the player receives the hook's status instead of a silent disconnect.
+    string response(writer.io.out_buffer.bytes(), writer.io.out_buffer.length());
+    EXPECT_FALSE(response.empty());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+
+    // The rejection must not leak the hook URL or any backend detail to the viewer.
+    EXPECT_EQ(string::npos, response.find("127.0.0.1"));
+    EXPECT_EQ(string::npos, response.find("api/v1/play"));
+
+    srs_freep(err);
+    stream.stat_ = NULL;
+    stream.security_ = NULL;
+    stream.config_ = NULL;
+    stream.hooks_ = NULL;
+    srs_freep(stream.entry_);
+}
+
+// HTTP-FLV: a viewer the security refuses is answered 403, whichever rule refuses it: a deny rule,
+// no allow rule that matches, or the security on with no rule at all.
+VOID TEST(HookRejectionTest, HttpFlvDeniedViewerReceivesForbidden)
+{
+    int codes[] = {ERROR_SYSTEM_SECURITY_DENY, ERROR_SYSTEM_SECURITY_ALLOW, ERROR_SYSTEM_SECURITY};
+    for (int i = 0; i < (int)(sizeof(codes) / sizeof(codes[0])); i++) {
+        int code = codes[i];
+        srs_error_t err = srs_success;
+
+        SrsUniquePtr<MockHttpMessageForLiveStream> message(new MockHttpMessageForLiveStream());
+        MockResponseWriter writer;
+        MockRequest request("test.vhost", "live", "stream1");
+        MockBufferCache cache;
+        MockStatisticForLiveStream stat;
+        MockAppConfigForLiveStreamHooks config;
+        MockHttpHooksForLiveStream hooks;
+
+        MockSecurity security;
+        security.check_error_ = srs_error_new(code, "deny by rule<127.0.0.1>");
+
+        SrsLiveStream stream(&request, &cache);
+        stream.stat_ = &stat;
+        srs_freep(stream.security_);
+        stream.security_ = &security;
+        stream.config_ = &config;
+        stream.hooks_ = &hooks;
+        stream.entry_ = new SrsHttpMuxEntry();
+        stream.entry_->enabled = false;
+
+        err = stream.serve_http(&writer, message.get());
+        EXPECT_EQ(code, srs_error_code(err));
+        EXPECT_EQ(1, security.check_count_);
+        EXPECT_EQ(0, hooks.on_play_count_);
+
+        // GOAL: the player gets 403 with the error code and name, not an empty reply.
+        string response(writer.io.out_buffer.bytes(), writer.io.out_buffer.length());
+        EXPECT_EQ(0, (int)response.find("HTTP/1.1 403")) << "code=" << code;
+        EXPECT_NE(string::npos, response.find(srs_fmt_sprintf("%d: ", code))) << "code=" << code;
+
+        // The rule that refused the viewer is the operator's, never told to the viewer.
+        EXPECT_EQ(string::npos, response.find("127.0.0.1")) << "code=" << code;
+
+        srs_freep(err);
+        stream.stat_ = NULL;
+        stream.security_ = NULL;
+        stream.config_ = NULL;
+        stream.hooks_ = NULL;
+        srs_freep(stream.entry_);
+    }
+}
+
+// HLS: a rejected viewer must receive the hook's status on the m3u8 request.
+//
+// SrsHlsStream::serve_new_session() has the same defect as HTTP-FLV: the hook error is returned
+// without writing a response, so the player's playlist request dies with no status.
+//
+// This enters through serve_m3u8_ctx(), the root of HLS streaming, because that is where the
+// status is decided; serve_new_session() only raises the error. See srs_http_stream_serve_error.
+VOID TEST(HookRejectionTest, HlsRejectedViewerReceivesHookStatus)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockHttpMessageForLiveStream> message(new MockHttpMessageForLiveStream());
+    MockResponseWriter writer;
+    SrsUniquePtr<MockRequest> request(new MockRequest("test.vhost", "live", "stream1"));
+    MockStatisticForLiveStream stat;
+    MockSecurity security;
+
+    // Enable the on_play hook for this vhost.
+    MockAppConfigForLiveStreamHooks config;
+    config.http_hooks_enabled_ = true;
+    config.on_play_directive_ = new SrsConfDirective();
+    config.on_play_directive_->name_ = "on_play";
+    config.on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    // The hook rejects this viewer as unauthorized.
+    MockHttpHooksForLiveStream hooks;
+    hooks.on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    // The constructor only captures dependencies, so the mocks below fully replace them. assemble()
+    // is deliberately not called: it only subscribes to the shared timer, which this test does not
+    // need, and skipping it keeps the test free of any global side effect.
+    SrsUniquePtr<SrsHlsStream> hls(new SrsHlsStream());
+    hls->config_ = &config;
+    hls->stat_ = &stat;
+    hls->hooks_ = &hooks;
+    srs_freep(hls->security_);
+    hls->security_ = &security;
+
+    // The file reader factory is not used, because a refused viewer never reaches the playlist.
+    bool served = false;
+    err = hls->serve_m3u8_ctx(&writer, message.get(), NULL, "", request.get(), &served);
+
+    // The hook must have been consulted and the playback rejected.
+    EXPECT_TRUE(served);
+    EXPECT_EQ(1, hooks.on_play_count_);
+
+    // GOAL: the player receives the hook's status instead of a silent disconnect.
+    string response(writer.io.out_buffer.bytes(), writer.io.out_buffer.length());
+    EXPECT_FALSE(response.empty());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+
+    // The rejection must not leak the hook URL or any backend detail to the viewer.
+    EXPECT_EQ(string::npos, response.find("127.0.0.1"));
+    EXPECT_EQ(string::npos, response.find("api/v1/play"));
+
+    srs_freep(err);
+    hls->config_ = NULL;
+    hls->stat_ = NULL;
+    hls->hooks_ = NULL;
+    hls->security_ = NULL;
+}
+
+MockFileReaderFactoryForHlsStream::MockFileReaderFactoryForHlsStream(std::string content)
+{
+    content_ = content;
+    create_count_ = 0;
+}
+
+MockFileReaderFactoryForHlsStream::~MockFileReaderFactoryForHlsStream()
+{
+}
+
+SrsFileReader *MockFileReaderFactoryForHlsStream::create_file_reader()
+{
+    create_count_++;
+    return new MockSrsFileReader(content_.data(), (int)content_.length());
+}
+
+// Request an HLS playlist with the given URL, and return the raw HTTP response in resp.
+static srs_error_t mock_hls_serve_m3u8(SrsHlsStream *hls, ISrsFileReaderFactory *factory, std::string url, std::string &resp)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockHttpMessageForLiveStream> message(new MockHttpMessageForLiveStream());
+    if ((err = message->set_url(url, false)) != srs_success) {
+        return srs_error_wrap(err, "set url");
+    }
+
+    SrsUniquePtr<MockRequest> request(new MockRequest("test.vhost", "live", "stream1"));
+    MockResponseWriter writer;
+
+    bool served = false;
+    err = hls->serve_m3u8_ctx(&writer, message.get(), factory, "./objs/nginx/html/live/stream1.m3u8", request.get(), &served);
+
+    resp = string(writer.io.out_buffer.bytes(), writer.io.out_buffer.length());
+    return err;
+}
+
+// HLS: a viewer rejected by the on_play hook must stay rejected when it retries with the same hls_ctx.
+//
+// The client may choose the hls_ctx of a new session in the query string. SrsHlsStream::serve_m3u8_ctx()
+// calls alive() even when serve_new_session() failed, so the rejected ctx is kept as a live session.
+// The retry then finds that ctx and takes serve_exists_session(), which serves the playlist without
+// consulting the hook, so any client passes on_play by simply asking twice.
+VOID TEST(HookRejectionTest, HlsRejectedViewerCannotRetryWithSameCtx)
+{
+    srs_error_t err = srs_success;
+
+    MockStatisticForLiveStream stat;
+    MockSecurity security;
+    MockFileReaderFactoryForHlsStream factory("#EXTM3U\n#EXTINF:10.000,\nstream1-0.ts\n");
+
+    MockAppConfigForLiveStreamHooks config;
+    config.http_hooks_enabled_ = true;
+    config.on_play_directive_ = new SrsConfDirective();
+    config.on_play_directive_->name_ = "on_play";
+    config.on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    // The hook rejects every attempt of this viewer as unauthorized.
+    MockHttpHooksForLiveStream hooks;
+    hooks.on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    // Only the captured dependencies are replaced. assemble() is not called, so the stream is never
+    // subscribed to the real shared timer.
+    SrsUniquePtr<SrsHlsStream> hls(new SrsHlsStream());
+    hls->config_ = &config;
+    hls->stat_ = &stat;
+    hls->hooks_ = &hooks;
+    srs_freep(hls->security_);
+    hls->security_ = &security;
+    hls->shared_timer_ = NULL;
+
+    // The first request with a client-chosen hls_ctx is refused by the hook.
+    string resp;
+    HELPER_EXPECT_FAILED(mock_hls_serve_m3u8(hls.get(), &factory, "/live/stream1.m3u8?hls_ctx=chosenbyclient", resp));
+    EXPECT_EQ(1, hooks.on_play_count_);
+    EXPECT_EQ(0, (int)resp.find("HTTP/1.1 401"));
+
+    // The refused viewer is removed from statistic at once, because it has no session to expire.
+    EXPECT_EQ(1, stat.on_disconnect_count_);
+
+    // GOAL: retrying with the same hls_ctx asks the hook again and is refused again. The playlist of
+    // the stream must never be read for a viewer the hook refused.
+    HELPER_EXPECT_FAILED(mock_hls_serve_m3u8(hls.get(), &factory, "/live/stream1.m3u8?hls_ctx=chosenbyclient", resp));
+    EXPECT_EQ(2, hooks.on_play_count_);
+    EXPECT_EQ(0, (int)resp.find("HTTP/1.1 401"));
+    EXPECT_EQ(string::npos, resp.find("stream1-0.ts"));
+    EXPECT_EQ(0, factory.create_count_);
+
+    hls->config_ = NULL;
+    hls->stat_ = NULL;
+    hls->hooks_ = NULL;
+    hls->security_ = NULL;
+}
+
+// HLS: a viewer denied by the security rules must stay denied when it retries with the same hls_ctx.
+//
+// The security check runs in serve_new_session() before the hook, so it is bypassed by the same retry
+// as the on_play hook. Each denied request is answered 403.
+VOID TEST(HookRejectionTest, HlsDeniedViewerCannotRetryWithSameCtx)
+{
+    srs_error_t err = srs_success;
+
+    MockStatisticForLiveStream stat;
+    MockAppConfigForLiveStreamHooks config;
+    MockHttpHooksForLiveStream hooks;
+    MockFileReaderFactoryForHlsStream factory("#EXTM3U\n#EXTINF:10.000,\nstream1-0.ts\n");
+
+    // The security rules deny every attempt of this viewer.
+    MockSecurity security;
+    security.check_error_ = srs_error_new(ERROR_SYSTEM_SECURITY_DENY, "deny by rule");
+
+    SrsUniquePtr<SrsHlsStream> hls(new SrsHlsStream());
+    hls->config_ = &config;
+    hls->stat_ = &stat;
+    hls->hooks_ = &hooks;
+    srs_freep(hls->security_);
+    hls->security_ = &security;
+    hls->shared_timer_ = NULL;
+
+    // The first request with a client-chosen hls_ctx is denied.
+    string resp;
+    HELPER_EXPECT_FAILED(mock_hls_serve_m3u8(hls.get(), &factory, "/live/stream1.m3u8?hls_ctx=chosenbyclient", resp));
+    EXPECT_EQ(1, security.check_count_);
+    EXPECT_EQ(0, (int)resp.find("HTTP/1.1 403"));
+
+    // The denied viewer is removed from statistic at once, because it has no session to expire.
+    EXPECT_EQ(1, stat.on_disconnect_count_);
+
+    // GOAL: retrying with the same hls_ctx runs the security check again and is denied again.
+    HELPER_EXPECT_FAILED(mock_hls_serve_m3u8(hls.get(), &factory, "/live/stream1.m3u8?hls_ctx=chosenbyclient", resp));
+    EXPECT_EQ(2, security.check_count_);
+    EXPECT_EQ(0, (int)resp.find("HTTP/1.1 403"));
+    EXPECT_EQ(string::npos, resp.find("stream1-0.ts"));
+    EXPECT_EQ(0, factory.create_count_);
+
+    hls->config_ = NULL;
+    hls->stat_ = NULL;
+    hls->hooks_ = NULL;
+    hls->security_ = NULL;
+}
+
+// RTMP: authorization must be decided before the client is told playback started.
+//
+// SrsRtmpConn::stream_service_cycle() calls rtmp_->start_play() first, which sends StreamBegin and
+// onStatus(NetStream.Play.Start) - a success signal - and only then consults the on_play hook. A
+// rejected viewer is therefore told "you are playing" and is then silently disconnected. The order
+// must be reversed so that a rejected viewer is never told playback started.
+VOID TEST(HookRejectionTest, RtmpRejectedViewerIsNotToldPlaybackStarted)
+{
+    srs_error_t err = srs_success;
+
+    MockRtmpTransportForDoCycle *transport = new MockRtmpTransportForDoCycle();
+    MockRtmpServer *rtmp = new MockRtmpServer();
+    MockSecurity *security = new MockSecurity();
+
+    // Enable the on_play hook for this vhost. The default vhost must exist, otherwise
+    // check_vhost() refuses the client long before the hook is consulted.
+    MockAppConfigForHttpHooksOnPlay *config = new MockAppConfigForHttpHooksOnPlay();
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->on_play_directive_ = new SrsConfDirective();
+    config->on_play_directive_->name_ = "on_play";
+    config->on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    // The hook rejects this viewer as unauthorized.
+    MockHttpHooksForOnPlay *hooks = new MockHttpHooksForOnPlay();
+    hooks->on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsRtmpConn *conn = new SrsRtmpConn(transport, "127.0.0.1", 1935);
+    conn->config_ = config;
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = rtmp;
+    srs_freep(conn->security_);
+    conn->security_ = security;
+    conn->hooks_ = hooks;
+
+    rtmp->type_ = SrsRtmpConnPlay;
+    rtmp->stream_ = "livestream";
+    conn->info_->type_ = SrsRtmpConnPlay;
+    conn->info_->req_->tcUrl_ = "rtmp://127.0.0.1/live";
+    conn->info_->req_->vhost_ = "__defaultVhost__";
+    conn->info_->req_->app_ = "live";
+    conn->info_->req_->stream_ = "livestream";
+
+    err = conn->stream_service_cycle();
+
+    // The hook must have been consulted and the playback rejected.
+    EXPECT_EQ(1, hooks->on_play_count_);
+    EXPECT_TRUE(err != srs_success);
+
+    // GOAL: a rejected viewer is never sent onStatus(NetStream.Play.Start), so authorization must
+    // be resolved before start_play() runs.
+    EXPECT_EQ(0, rtmp->start_play_count_);
+
+    srs_freep(err);
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// RTMP: the same ordering defect on the publish side.
+//
+// stream_service_cycle() calls rtmp_->start_fmle_publish(), which answers the publisher with
+// onStatus(NetStream.Publish.Start), before publishing() consults the on_publish hook. A rejected
+// publisher is therefore told publishing started and is then silently disconnected. Publishers are
+// the more common target of hook authorization, because stream keys are usually checked there.
+VOID TEST(HookRejectionTest, RtmpRejectedPublisherIsNotToldPublishStarted)
+{
+    srs_error_t err = srs_success;
+
+    MockRtmpTransportForDoCycle *transport = new MockRtmpTransportForDoCycle();
+    MockRtmpServer *rtmp = new MockRtmpServer();
+    MockSecurity *security = new MockSecurity();
+
+    // Enable the on_publish hook for this vhost. The default vhost must exist, otherwise
+    // check_vhost() refuses the client long before the hook is consulted.
+    MockAppConfigForHttpHooksOnPublish *config = new MockAppConfigForHttpHooksOnPublish();
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->on_publish_directive_ = new SrsConfDirective();
+    config->on_publish_directive_->name_ = "on_publish";
+    config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+    // The hook rejects this publisher as unauthorized.
+    MockHttpHooksForOnPublish *hooks = new MockHttpHooksForOnPublish();
+    hooks->on_publish_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsRtmpConn *conn = new SrsRtmpConn(transport, "127.0.0.1", 1935);
+    conn->config_ = config;
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = rtmp;
+    srs_freep(conn->security_);
+    conn->security_ = security;
+    conn->hooks_ = hooks;
+
+    rtmp->type_ = SrsRtmpConnFMLEPublish;
+    rtmp->stream_ = "livestream";
+    conn->info_->type_ = SrsRtmpConnFMLEPublish;
+    conn->info_->req_->tcUrl_ = "rtmp://127.0.0.1/live";
+    conn->info_->req_->vhost_ = "__defaultVhost__";
+    conn->info_->req_->app_ = "live";
+    conn->info_->req_->stream_ = "livestream";
+
+    err = conn->stream_service_cycle();
+
+    // The hook must have been consulted and the publish rejected.
+    EXPECT_EQ(1, hooks->on_publish_count_);
+    EXPECT_TRUE(err != srs_success);
+
+    // GOAL: a rejected publisher is never sent onStatus(NetStream.Publish.Start), so authorization
+    // must be resolved before start_fmle_publish() runs.
+    EXPECT_EQ(0, rtmp->start_fmle_publish_count_);
+
+    srs_freep(err);
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// RTMP: on_play runs before start_play(), so a viewer the hook accepted can still fail in
+// start_play(), for example when it closed the socket during a slow callback. The hook backend
+// counted that viewer, so it must still get the on_stop that pairs with the accepted on_play.
+VOID TEST(HookRejectionTest, RtmpAcceptedViewerGetsOnStopWhenStartPlayFails)
+{
+    srs_error_t err = srs_success;
+
+    MockRtmpTransportForDoCycle *transport = new MockRtmpTransportForDoCycle();
+    MockRtmpServer *rtmp = new MockRtmpServer();
+    MockSecurity *security = new MockSecurity();
+
+    MockAppConfigForSrtHooks *config = new MockAppConfigForSrtHooks();
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->set_on_play_urls(std::vector<std::string>(1, "http://127.0.0.1:8085/api/v1/play"));
+    config->set_on_stop_urls(std::vector<std::string>(1, "http://127.0.0.1:8085/api/v1/stop"));
+
+    // The hook accepts the viewer, then answering the play fails.
+    MockHttpHooksForSrt *hooks = new MockHttpHooksForSrt();
+    rtmp->start_play_error_ = srs_error_new(ERROR_SOCKET_WRITE, "mock start play");
+
+    SrsRtmpConn *conn = new SrsRtmpConn(transport, "127.0.0.1", 1935);
+    conn->config_ = config;
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = rtmp;
+    srs_freep(conn->security_);
+    conn->security_ = security;
+    conn->hooks_ = hooks;
+
+    rtmp->type_ = SrsRtmpConnPlay;
+    rtmp->stream_ = "livestream";
+    conn->info_->type_ = SrsRtmpConnPlay;
+    conn->info_->req_->tcUrl_ = "rtmp://127.0.0.1/live";
+    conn->info_->req_->vhost_ = "__defaultVhost__";
+    conn->info_->req_->app_ = "live";
+    conn->info_->req_->stream_ = "livestream";
+
+    err = conn->stream_service_cycle();
+    EXPECT_TRUE(err != srs_success);
+
+    EXPECT_EQ(1, hooks->on_play_count_);
+    EXPECT_EQ(1, rtmp->start_play_count_);
+    EXPECT_EQ(1, hooks->on_stop_count_);
+
+    srs_freep(err);
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// RTMP: on_publish runs before start_fmle_publish(), so a publisher the hook accepted can still
+// fail in the FMLE handshake, for example when it disconnects during a slow callback. The hook
+// backend counted that publisher, so it must still get the on_unpublish that pairs with it.
+VOID TEST(HookRejectionTest, RtmpAcceptedPublisherGetsOnUnpublishWhenStartPublishFails)
+{
+    srs_error_t err = srs_success;
+
+    MockRtmpTransportForDoCycle *transport = new MockRtmpTransportForDoCycle();
+    MockRtmpServer *rtmp = new MockRtmpServer();
+    MockSecurity *security = new MockSecurity();
+
+    MockAppConfigForSrtHooks *config = new MockAppConfigForSrtHooks();
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->set_on_publish_urls(std::vector<std::string>(1, "http://127.0.0.1:8085/api/v1/publish"));
+    config->set_on_unpublish_urls(std::vector<std::string>(1, "http://127.0.0.1:8085/api/v1/unpublish"));
+
+    // The hook accepts the publisher, then the FMLE handshake fails.
+    MockHttpHooksForSrt *hooks = new MockHttpHooksForSrt();
+    rtmp->start_publish_error_ = srs_error_new(ERROR_SOCKET_READ, "mock start FMLE publish");
+
+    SrsRtmpConn *conn = new SrsRtmpConn(transport, "127.0.0.1", 1935);
+    conn->config_ = config;
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = rtmp;
+    srs_freep(conn->security_);
+    conn->security_ = security;
+    conn->hooks_ = hooks;
+
+    rtmp->type_ = SrsRtmpConnFMLEPublish;
+    rtmp->stream_ = "livestream";
+    conn->info_->type_ = SrsRtmpConnFMLEPublish;
+    conn->info_->req_->tcUrl_ = "rtmp://127.0.0.1/live";
+    conn->info_->req_->vhost_ = "__defaultVhost__";
+    conn->info_->req_->app_ = "live";
+    conn->info_->req_->stream_ = "livestream";
+
+    err = conn->stream_service_cycle();
+    EXPECT_TRUE(err != srs_success);
+
+    EXPECT_EQ(1, hooks->on_publish_count_);
+    EXPECT_EQ(1, rtmp->start_fmle_publish_count_);
+    EXPECT_EQ(1, hooks->on_unpublish_count_);
+
+    srs_freep(err);
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// RTMP: an FMLE encoder unpublishes and publishes again on the same connection, and each publish
+// runs stream_service_cycle() on the same request. Each publish must parse the param of the tcUrl
+// and its own stream name only, not append the last publish's param again.
+VOID TEST(HookRejectionTest, RtmpRepublishParsesParamOnce)
+{
+    struct {
+        const char *tc_url;
+        const char *connect_param;
+        const char *want;
+    } cases[] = {
+        {"rtmp://127.0.0.1/live", "", "?k2=v2"},
+        {"rtmp://127.0.0.1/live?k1=v1", "?k1=v1", "?k1=v1&k2=v2"},
+    };
+
+    for (int i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        MockRtmpTransportForDoCycle *transport = new MockRtmpTransportForDoCycle();
+        MockRtmpServer *rtmp = new MockRtmpServer();
+        MockSecurity *security = new MockSecurity();
+
+        MockAppConfigForHttpHooksOnPublish *config = new MockAppConfigForHttpHooksOnPublish();
+        config->default_vhost_ = new SrsConfDirective();
+        config->default_vhost_->name_ = "vhost";
+        config->default_vhost_->args_.push_back("__defaultVhost__");
+        config->http_hooks_enabled_ = true;
+        config->on_publish_directive_ = new SrsConfDirective();
+        config->on_publish_directive_->name_ = "on_publish";
+        config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+        // The hook refuses each publish, so each cycle ends after it, as an unpublish would.
+        MockHttpHooksForOnPublish *hooks = new MockHttpHooksForOnPublish();
+        hooks->on_publish_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+        SrsRtmpConn *conn = new SrsRtmpConn(transport, "127.0.0.1", 1935);
+        conn->config_ = config;
+        conn->assemble();
+
+        srs_freep(conn->rtmp_);
+        conn->rtmp_ = rtmp;
+        srs_freep(conn->security_);
+        conn->security_ = security;
+        conn->hooks_ = hooks;
+
+        // The request as the connect left it: the tcUrl's param, no stream.
+        rtmp->type_ = SrsRtmpConnFMLEPublish;
+        rtmp->stream_ = "livestream?k2=v2";
+        conn->info_->type_ = SrsRtmpConnFMLEPublish;
+        ISrsRequest *req = conn->info_->req_;
+        req->tcUrl_ = cases[i].tc_url;
+        req->vhost_ = "__defaultVhost__";
+        req->app_ = "live";
+        req->param_ = cases[i].connect_param;
+
+        for (int publish = 0; publish < 2; publish++) {
+            srs_error_t err = conn->stream_service_cycle();
+            EXPECT_TRUE(err != srs_success);
+            srs_freep(err);
+
+            EXPECT_EQ(publish + 1, hooks->on_publish_count_) << cases[i].tc_url;
+            EXPECT_STREQ("livestream", req->stream_.c_str()) << cases[i].tc_url << " publish " << publish;
+            EXPECT_STREQ(cases[i].want, req->param_.c_str()) << cases[i].tc_url << " publish " << publish;
+        }
+
+        conn->hooks_ = NULL;
+        srs_freep(conn);
+        srs_freep(config);
+        srs_freep(hooks);
+    }
+}
+
+// Counts the connect answers an origin sends, and how many on_connect hooks came before each.
+class MockRtmpServerForConnectAnswer : public MockRtmpServer
+{
+public:
+    MockHttpHooksForOnConnect *hooks_;
+    int response_connect_app_count_;
+    int on_connect_count_at_response_;
+
+public:
+    MockRtmpServerForConnectAnswer(MockHttpHooksForOnConnect *hooks)
+    {
+        hooks_ = hooks;
+        response_connect_app_count_ = 0;
+        on_connect_count_at_response_ = -1;
+    }
+
+public:
+    virtual srs_error_t response_connect_app(ISrsRequest *req, const char *server_ip = NULL)
+    {
+        response_connect_app_count_++;
+        on_connect_count_at_response_ = hooks_->on_connect_count_;
+        return srs_success;
+    }
+};
+
+// Makes an origin's RTMP connection with the on_connect hook on, whose connect has the tcUrl
+// rtmp://127.0.0.1/live.
+static SrsRtmpConn *mock_rtmp_origin_conn(MockAppConfigForHttpHooksOnConnect *config, MockHttpHooksForOnConnect *hooks,
+                                          MockRtmpServerForConnectAnswer *rtmp)
+{
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->on_connect_directive_ = new SrsConfDirective();
+    config->on_connect_directive_->name_ = "on_connect";
+    config->on_connect_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/clients");
+
+    // The service cycle ends at its first pull, after the connect's answer, before any play or publish.
+    MockCoroutineForRtmpConn *trd = new MockCoroutineForRtmpConn();
+    trd->pull_count_ = 1;
+    trd->pull_error_ = srs_error_new(ERROR_THREAD_INTERRUPED, "mock thread interrupted");
+
+    SrsRtmpConn *conn = new SrsRtmpConn(new MockRtmpTransportForDoCycle(), "127.0.0.1", 1935);
+    conn->config_ = config;
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = rtmp;
+    srs_freep(conn->trd_);
+    conn->trd_ = trd;
+    conn->hooks_ = hooks;
+
+    ISrsRequest *req = conn->info_->req_;
+    req->tcUrl_ = "rtmp://127.0.0.1/live";
+    req->schema_ = "rtmp";
+    req->host_ = "127.0.0.1";
+    req->vhost_ = "127.0.0.1";
+    req->app_ = "live";
+    req->port_ = 1935;
+
+    return conn;
+}
+
+// An origin answers a connect before any hook: its on_connect comes after its play or publish. Edge
+// token traverse is removed, so the property an older edge's check adds to its connect is a property
+// like any other: the origin neither checks it by on_connect nor takes the stream from it.
+VOID TEST(HookRejectionTest, ConnectAnsweredBeforeHook)
+{
+    for (int old_edge = 0; old_edge < 2; old_edge++) {
+        srs_error_t err = srs_success;
+
+        MockAppConfigForHttpHooksOnConnect config;
+        MockHttpHooksForOnConnect hooks;
+        hooks.on_connect_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+        MockRtmpServerForConnectAnswer *rtmp = new MockRtmpServerForConnectAnswer(&hooks);
+
+        SrsRtmpConn *conn = mock_rtmp_origin_conn(&config, &hooks, rtmp);
+        ISrsRequest *req = conn->info_->req_;
+        if (old_edge) {
+            req->args_ = SrsAmf0Any::object();
+            req->args_->set("srs_token_traverse", SrsAmf0Any::str("livestream?token=bad"));
+        }
+
+        err = conn->service_cycle();
+        HELPER_EXPECT_FAILED(err);
+
+        EXPECT_EQ(0, hooks.on_connect_count_) << old_edge;
+        EXPECT_EQ(1, rtmp->response_connect_app_count_) << old_edge;
+        EXPECT_EQ(0, rtmp->on_connect_count_at_response_) << old_edge;
+        EXPECT_STREQ("", req->stream_.c_str()) << old_edge;
+        EXPECT_STREQ("", req->param_.c_str()) << old_edge;
+
+        conn->hooks_ = NULL;
+        srs_freep(conn);
+    }
+}
+
+// The config of the on_connect hook, with the on_close hook on too.
+class MockAppConfigForHttpHooksOnConnectAndClose : public MockAppConfigForHttpHooksOnConnect
+{
+public:
+    SrsConfDirective *on_close_directive_;
+
+public:
+    MockAppConfigForHttpHooksOnConnectAndClose()
+    {
+        on_close_directive_ = new SrsConfDirective();
+        on_close_directive_->name_ = "on_close";
+        on_close_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/clients");
+    }
+    virtual ~MockAppConfigForHttpHooksOnConnectAndClose()
+    {
+        srs_freep(on_close_directive_);
+    }
+
+public:
+    virtual SrsConfDirective *get_vhost_on_close(std::string vhost)
+    {
+        return on_close_directive_;
+    }
+};
+
+// RTMP on_connect and on_close come in pairs.
+//
+// A hook server sees an RTMP client's on_close only after its on_connect, which SRS sends once the
+// client plays or publishes and its vhost is resolved. A client that only connects and closes got
+// an on_close with no on_connect before it, with the tcUrl's host as its vhost, a close of a client
+// the hook server never saw. It must get neither.
+VOID TEST(HookRejectionTest, ConnectOnlyClientGetsNoOnClose)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForHttpHooksOnConnectAndClose config;
+    MockHttpHooksForOnConnect hooks;
+    MockRtmpServerForConnectAnswer *rtmp = new MockRtmpServerForConnectAnswer(&hooks);
+
+    SrsRtmpConn *conn = mock_rtmp_origin_conn(&config, &hooks, rtmp);
+
+    err = conn->service_cycle();
+    HELPER_EXPECT_FAILED(err);
+    HELPER_EXPECT_SUCCESS(conn->on_disconnect());
+
+    // GOAL: no on_close of a client whose on_connect was never sent.
+    EXPECT_EQ(0, hooks.on_connect_count_);
+    EXPECT_EQ(0, hooks.on_close_count_);
+
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+}
+
+VOID TEST(HookRejectionTest, CheckedClientGetsOnCloseAfterOnConnect)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForHttpHooksOnConnectAndClose config;
+    MockHttpHooksForOnConnect hooks;
+    MockRtmpServerForConnectAnswer *rtmp = new MockRtmpServerForConnectAnswer(&hooks);
+
+    SrsRtmpConn *conn = mock_rtmp_origin_conn(&config, &hooks, rtmp);
+
+    // A client that plays or publishes is checked with its vhost resolved.
+    HELPER_EXPECT_SUCCESS(conn->check_vhost(true));
+    EXPECT_EQ(1, hooks.on_connect_count_);
+    EXPECT_EQ(0, hooks.on_close_count_);
+
+    // GOAL: its on_close comes, with the vhost of its on_connect.
+    HELPER_EXPECT_SUCCESS(conn->on_disconnect());
+    EXPECT_EQ(1, hooks.on_close_count_);
+    EXPECT_STREQ("__defaultVhost__", conn->info_->req_->vhost_.c_str());
+
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+}
+
+// A client whose on_connect refused it gets no on_close, as a client whose on_play refused it gets
+// no on_stop, and one whose on_publish refused it no on_unpublish: the hook server never accepted
+// it, so it has nothing to close.
+VOID TEST(HookRejectionTest, RefusedClientGetsNoOnClose)
+{
+    srs_error_t err = srs_success;
+
+    MockAppConfigForHttpHooksOnConnectAndClose config;
+    MockHttpHooksForOnConnect hooks;
+    hooks.on_connect_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+    MockRtmpServerForConnectAnswer *rtmp = new MockRtmpServerForConnectAnswer(&hooks);
+
+    SrsRtmpConn *conn = mock_rtmp_origin_conn(&config, &hooks, rtmp);
+
+    // A client that plays or publishes is checked, and refused.
+    HELPER_EXPECT_FAILED(conn->check_vhost(true));
+    EXPECT_EQ(1, hooks.on_connect_count_);
+    EXPECT_EQ(0, hooks.on_close_count_);
+
+    // GOAL: its close sends no on_close.
+    HELPER_EXPECT_SUCCESS(conn->on_disconnect());
+    EXPECT_EQ(1, hooks.on_connect_count_);
+    EXPECT_EQ(0, hooks.on_close_count_);
+
+    conn->hooks_ = NULL;
+    srs_freep(conn);
+}
+
+// WebRTC: the hook's status must survive to the WHEP/play response.
+//
+// SrsGoApiRtcWhip::serve_http() already maps error codes onto real HTTP statuses, and it already
+// has an authorization status: ERROR_SYSTEM_AUTH answers 401. A rejected on_play hook returns
+// ERROR_RESPONSE_CODE, which matches none of the mapped codes and therefore falls through to
+// 500 Internal Server Error - a server fault, not an authorization decision.
+//
+// This exercises the standard WHEP API, not the deprecated JSON play API. The JSON API answers
+// HTTP 200 with a fixed {"code":400} for every failure and is not where playback behavior should
+// be tested or extended; see the deprecation note on SrsGoApiRtcPlay::serve_http().
+VOID TEST(HookRejectionTest, WhepRejectedViewerReceivesHookStatus)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServer> server(new MockRtcApiServer());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+
+    // The WHEP endpoint, which dispatches to the play negotiation.
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whep/?app=live&stream=livestream", false));
+
+    // Enable WebRTC and the on_play hook for this vhost.
+    MockAppConfigForRtcPlay *config = new MockAppConfigForRtcPlay();
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->rtc_from_rtmp_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_play_directive_ = new SrsConfDirective();
+    config->on_play_directive_->name_ = "on_play";
+    config->on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    // The hook rejects this viewer as unauthorized. MockHttpHooksForRtcPlay always succeeds, so use
+    // the hook mock that supports error injection.
+    MockHttpHooksForOnPlay *hooks = new MockHttpHooksForOnPlay();
+    hooks->on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config;
+    api->play_->config_ = config;
+    api->play_->hooks_ = hooks;
+
+    // WHEP carries the offer as a raw SDP body, not as JSON.
+    message->body_content_ = "v=0\r\n"
+                             "o=- 0 0 IN IP4 127.0.0.1\r\n"
+                             "s=-\r\n"
+                             "t=0 0\r\n"
+                             "a=group:BUNDLE 0\r\n"
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                             "c=IN IP4 0.0.0.0\r\n"
+                             "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+                             "a=ice-ufrag:test\r\n"
+                             "a=ice-pwd:testpasswordtestpassword\r\n"
+                             "a=fingerprint:sha-256 "
+                             "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:"
+                             "44:55:66:77:88:99\r\n"
+                             "a=setup:actpass\r\n"
+                             "a=mid:0\r\n"
+                             "a=recvonly\r\n"
+                             "a=rtcp-mux\r\n"
+                             "a=rtpmap:111 opus/48000/2\r\n";
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    // The hook must have been consulted and the playback rejected.
+    EXPECT_EQ(1, hooks->on_play_count_);
+
+    // GOAL: the rejection is reported as an authorization failure, not as a server fault.
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_FALSE(response.empty());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+
+    // The rejection must not leak the hook URL or any backend detail to the viewer.
+    EXPECT_EQ(string::npos, response.find("8085"));
+    EXPECT_EQ(string::npos, response.find("api/v1/play"));
+
+    api->config_ = NULL;
+    api->play_->config_ = NULL;
+    api->play_->hooks_ = NULL;
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// WHEP: a viewer the security denies is refused as unauthorized, 401, as a denied WHIP publisher
+// is, not answered 500 as a server fault. The security check comes before the hook, so the hook is
+// not consulted.
+VOID TEST(HookRejectionTest, WhepDeniedViewerReceivesAuthStatus)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServer> server(new MockRtcApiServer());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whep/?app=live&stream=livestream", false));
+
+    MockAppConfigForRtcPlay *config = new MockAppConfigForRtcPlay();
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->rtc_from_rtmp_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_play_directive_ = new SrsConfDirective();
+    config->on_play_directive_->name_ = "on_play";
+    config->on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/play");
+
+    MockHttpHooksForOnPlay *hooks = new MockHttpHooksForOnPlay();
+
+    MockSecurity *security = new MockSecurity();
+    security->check_error_ = srs_error_new(ERROR_SYSTEM_SECURITY_DENY, "denied");
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config;
+    api->play_->config_ = config;
+    api->play_->hooks_ = hooks;
+    srs_freep(api->play_->security_);
+    api->play_->security_ = security;
+
+    message->body_content_ = "v=0\r\n"
+                             "o=- 0 0 IN IP4 127.0.0.1\r\n"
+                             "s=-\r\n"
+                             "t=0 0\r\n"
+                             "a=group:BUNDLE 0\r\n"
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                             "c=IN IP4 0.0.0.0\r\n"
+                             "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+                             "a=ice-ufrag:test\r\n"
+                             "a=ice-pwd:testpasswordtestpassword\r\n"
+                             "a=fingerprint:sha-256 "
+                             "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:"
+                             "44:55:66:77:88:99\r\n"
+                             "a=setup:actpass\r\n"
+                             "a=mid:0\r\n"
+                             "a=recvonly\r\n"
+                             "a=rtcp-mux\r\n"
+                             "a=rtpmap:111 opus/48000/2\r\n";
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    EXPECT_EQ(1, security->check_count_);
+    EXPECT_EQ(0, hooks->on_play_count_);
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+
+    api->config_ = NULL;
+    api->play_->config_ = NULL;
+    api->play_->hooks_ = NULL;
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// A WHIP session that counts how often it is expired, which removes it from the server.
+class MockRtcConnectionForRefusedPublish : public MockRtcConnectionForUpdateSessions
+{
+public:
+    int expire_count_;
+
+public:
+    MockRtcConnectionForRefusedPublish()
+    {
+        username_ = "refused-publisher";
+        expire_count_ = 0;
+    }
+    virtual ~MockRtcConnectionForRefusedPublish()
+    {
+    }
+
+public:
+    virtual void expire()
+    {
+        expire_count_++;
+    }
+};
+
+// An RTC API server that creates one session and finds it by its username, until the session is
+// gone, as the server's STUN timeout removes it.
+class MockRtcApiServerForRefusedPublish : public ISrsRtcApiServer
+{
+public:
+    MockRtcConnectionForRefusedPublish session_;
+    int create_count_;
+    bool session_gone_;
+    std::string find_username_;
+
+public:
+    MockRtcApiServerForRefusedPublish()
+    {
+        create_count_ = 0;
+        session_gone_ = false;
+    }
+    virtual ~MockRtcApiServerForRefusedPublish()
+    {
+    }
+
+public:
+    virtual srs_error_t create_rtc_session(SrsRtcUserConfig *ruc, SrsSdp &local_sdp, ISrsRtcConnection **psession)
+    {
+        create_count_++;
+        *psession = &session_;
+        return srs_success;
+    }
+    virtual ISrsRtcConnection *find_rtc_session_by_username(const std::string &ufrag)
+    {
+        find_username_ = ufrag;
+        if (session_gone_ || ufrag != session_.username_) {
+            return NULL;
+        }
+        return &session_;
+    }
+};
+
+// The offer of a WHIP publisher, a raw SDP body that sends Opus.
+static std::string mock_whip_publish_offer()
+{
+    return "v=0\r\n"
+           "o=- 0 0 IN IP4 127.0.0.1\r\n"
+           "s=-\r\n"
+           "t=0 0\r\n"
+           "a=group:BUNDLE 0\r\n"
+           "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+           "c=IN IP4 0.0.0.0\r\n"
+           "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+           "a=ice-ufrag:test\r\n"
+           "a=ice-pwd:testpasswordtestpassword\r\n"
+           "a=fingerprint:sha-256 "
+           "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:"
+           "44:55:66:77:88:99\r\n"
+           "a=setup:actpass\r\n"
+           "a=mid:0\r\n"
+           "a=sendonly\r\n"
+           "a=rtcp-mux\r\n"
+           "a=rtpmap:111 opus/48000/2\r\n";
+}
+
+// WHIP: a rejected publisher already receives 401, and must keep receiving it.
+//
+// WHIP is HTTP just as WHEP is, so a rejected publisher deserves the same authorization status as
+// a rejected viewer - and here SRS already does it. SrsGoApiRtcPublish::serve_http() converts the
+// hook rejection with srs_error_transform(ERROR_SYSTEM_AUTH, ...) rather than srs_error_wrap(), so
+// SrsGoApiRtcWhip::serve_http() maps it onto 401.
+//
+// Unlike the other tests here this one is expected to PASS today. It is a regression guard, and it
+// records the pattern the WHEP play path should adopt: the mechanism already exists in the sibling
+// class, so the play fix is to reuse it rather than to invent anything.
+VOID TEST(HookRejectionTest, WhipRejectedPublisherReceivesHookStatus)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+
+    // The WHIP endpoint, which defaults to the publish action.
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whip/?app=live&stream=livestream", false));
+
+    // Enable WebRTC and the on_publish hook for this vhost.
+    MockAppConfigForHttpHooksOnPublish *config = new MockAppConfigForHttpHooksOnPublish();
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_publish_directive_ = new SrsConfDirective();
+    config->on_publish_directive_->name_ = "on_publish";
+    config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+    // The hook rejects this publisher as unauthorized.
+    MockHttpHooksForOnPublish *hooks = new MockHttpHooksForOnPublish();
+    hooks->on_publish_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config;
+    api->publish_->config_ = config;
+    api->publish_->hooks_ = hooks;
+
+    // WHIP carries the offer as a raw SDP body, not as JSON.
+    message->body_content_ = "v=0\r\n"
+                             "o=- 0 0 IN IP4 127.0.0.1\r\n"
+                             "s=-\r\n"
+                             "t=0 0\r\n"
+                             "a=group:BUNDLE 0\r\n"
+                             "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+                             "c=IN IP4 0.0.0.0\r\n"
+                             "a=rtcp:9 IN IP4 0.0.0.0\r\n"
+                             "a=ice-ufrag:test\r\n"
+                             "a=ice-pwd:testpasswordtestpassword\r\n"
+                             "a=fingerprint:sha-256 "
+                             "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:"
+                             "44:55:66:77:88:99\r\n"
+                             "a=setup:actpass\r\n"
+                             "a=mid:0\r\n"
+                             "a=sendonly\r\n"
+                             "a=rtcp-mux\r\n"
+                             "a=rtpmap:111 opus/48000/2\r\n";
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    // The hook must have been consulted and the publish rejected.
+    EXPECT_EQ(1, hooks->on_publish_count_);
+
+    // The rejection is reported as an authorization failure, not as a server fault.
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_FALSE(response.empty());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+
+    // The rejection must not leak the hook URL or any backend detail to the publisher.
+    EXPECT_EQ(string::npos, response.find("8085"));
+    EXPECT_EQ(string::npos, response.find("api/v1/publish"));
+
+    api->config_ = NULL;
+    api->publish_->config_ = NULL;
+    api->publish_->hooks_ = NULL;
+    srs_freep(config);
+    srs_freep(hooks);
+}
+
+// WHIP: a publisher that on_publish refuses must not hold the stream.
+//
+// The session is made before the hook, for the hook reports the stream the session adds to the
+// stat, and the session holds the stream's publish token until it is removed. A refused publisher
+// never connects, so unless SRS removes its session at once, the stream stays busy (409) for the
+// next publisher until the session times out without STUN.
+VOID TEST(HookRejectionTest, WhipRejectedPublisherFreesSession)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whip/?app=live&stream=livestream", false));
+    message->body_content_ = mock_whip_publish_offer();
+
+    SrsUniquePtr<MockAppConfigForHttpHooksOnPublish> config(new MockAppConfigForHttpHooksOnPublish());
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_publish_directive_ = new SrsConfDirective();
+    config->on_publish_directive_->name_ = "on_publish";
+    config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+    SrsUniquePtr<MockHttpHooksForOnPublish> hooks(new MockHttpHooksForOnPublish());
+    hooks->on_publish_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config.get();
+    api->publish_->config_ = config.get();
+    api->publish_->hooks_ = hooks.get();
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+    EXPECT_EQ(1, hooks->on_publish_count_);
+
+    // The refused session is removed, so it frees the stream.
+    EXPECT_EQ(1, server->session_.expire_count_);
+
+    api->config_ = NULL;
+    api->publish_->config_ = NULL;
+    api->publish_->hooks_ = NULL;
+}
+
+// WHIP: a publisher the security denies must not hold the stream either. The security check needs
+// no session, so it comes first, as for a WHEP player, and a denied publisher makes none.
+VOID TEST(HookRejectionTest, WhipDeniedPublisherMakesNoSession)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whip/?app=live&stream=livestream", false));
+    message->body_content_ = mock_whip_publish_offer();
+
+    SrsUniquePtr<MockAppConfigForHttpHooksOnPublish> config(new MockAppConfigForHttpHooksOnPublish());
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+
+    MockSecurity *security = new MockSecurity();
+    security->check_error_ = srs_error_new(ERROR_SYSTEM_SECURITY_DENY, "denied");
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config.get();
+    api->publish_->config_ = config.get();
+    srs_freep(api->publish_->security_);
+    api->publish_->security_ = security;
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+    EXPECT_EQ(1, security->check_count_);
+    EXPECT_EQ(0, server->create_count_);
+    EXPECT_EQ(0, server->session_.expire_count_);
+
+    api->config_ = NULL;
+    api->publish_->config_ = NULL;
+}
+
+// Serve a WHIP publish whose on_publish hook passes, on a server whose session is gone or
+// disposing by the time the hook answers, as is_gone and is_disposing say.
+static void mock_whip_publish_hook_passed(MockRtcApiServerForRefusedPublish *server, MockResponseWriter *writer,
+                                          bool is_gone, bool is_disposing)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whip/?app=live&stream=livestream", false));
+    message->body_content_ = mock_whip_publish_offer();
+
+    SrsUniquePtr<MockAppConfigForHttpHooksOnPublish> config(new MockAppConfigForHttpHooksOnPublish());
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_publish_directive_ = new SrsConfDirective();
+    config->on_publish_directive_->name_ = "on_publish";
+    config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+    SrsUniquePtr<MockHttpHooksForOnPublish> hooks(new MockHttpHooksForOnPublish());
+
+    server->session_gone_ = is_gone;
+    server->session_.is_disposing_ = is_disposing;
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server));
+    api->config_ = config.get();
+    api->publish_->config_ = config.get();
+    api->publish_->hooks_ = hooks.get();
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer, message.get()));
+    EXPECT_EQ(1, hooks->on_publish_count_);
+
+    api->config_ = NULL;
+    api->publish_->config_ = NULL;
+    api->publish_->hooks_ = NULL;
+}
+
+// WHIP: a publisher whose hook passes gets its answer, for its session is still there after the hook.
+VOID TEST(HookRejectionTest, WhipPublisherAnsweredAfterHook)
+{
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    mock_whip_publish_hook_passed(server.get(), writer.get(), false, false);
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 201"));
+    EXPECT_STREQ("refused-publisher", server->find_username_.c_str());
+    EXPECT_EQ(0, server->session_.expire_count_);
+}
+
+// WHIP: a hook that passes after the STUN timeout, or after an API DELETE of the client, answers
+// when the session is already freed. SRS finds the session again by its username after the hook,
+// and answers an error for a session that is gone, never touching the freed one.
+VOID TEST(HookRejectionTest, WhipPublisherSessionGoneAfterHook)
+{
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    mock_whip_publish_hook_passed(server.get(), writer.get(), true, false);
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 500"));
+    EXPECT_NE(string::npos, response.find("5036: RtcInvalidSession"));
+    EXPECT_STREQ("refused-publisher", server->find_username_.c_str());
+    EXPECT_EQ(0, server->session_.expire_count_);
+}
+
+// WHIP: a session removed during the hook but not yet freed is disposing, so it gets the same error.
+VOID TEST(HookRejectionTest, WhipPublisherSessionDisposingAfterHook)
+{
+    SrsUniquePtr<MockRtcApiServerForRefusedPublish> server(new MockRtcApiServerForRefusedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    mock_whip_publish_hook_passed(server.get(), writer.get(), false, true);
+
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 500"));
+    EXPECT_NE(string::npos, response.find("5036: RtcInvalidSession"));
+    EXPECT_EQ(0, server->session_.expire_count_);
+}
+
+// A WHIP session on the heap, which counts its expires in the server that owns it.
+class MockRtcConnectionForFreedPublish : public MockRtcConnectionForUpdateSessions
+{
+public:
+    int *expire_count_;
+
+public:
+    MockRtcConnectionForFreedPublish(int *expire_count)
+    {
+        username_ = "freed-publisher";
+        expire_count_ = expire_count;
+    }
+    virtual ~MockRtcConnectionForFreedPublish()
+    {
+    }
+
+public:
+    virtual void expire()
+    {
+        (*expire_count_)++;
+    }
+};
+
+// An RTC API server that owns its one session and frees it when it times out without STUN, so a
+// freed session is never found again.
+class MockRtcApiServerForFreedPublish : public ISrsRtcApiServer
+{
+public:
+    MockRtcConnectionForFreedPublish *session_;
+    int create_count_;
+    int expire_count_;
+    std::string find_username_;
+
+public:
+    MockRtcApiServerForFreedPublish()
+    {
+        session_ = NULL;
+        create_count_ = 0;
+        expire_count_ = 0;
+    }
+    virtual ~MockRtcApiServerForFreedPublish()
+    {
+        srs_freep(session_);
+    }
+
+public:
+    virtual srs_error_t create_rtc_session(SrsRtcUserConfig *ruc, SrsSdp &local_sdp, ISrsRtcConnection **psession)
+    {
+        create_count_++;
+        session_ = new MockRtcConnectionForFreedPublish(&expire_count_);
+        *psession = session_;
+        return srs_success;
+    }
+    virtual ISrsRtcConnection *find_rtc_session_by_username(const std::string &ufrag)
+    {
+        find_username_ = ufrag;
+        if (!session_ || ufrag != session_->username_) {
+            return NULL;
+        }
+        return session_;
+    }
+    void stun_timeout()
+    {
+        srs_freep(session_);
+    }
+};
+
+// An on_publish hook that is slower than the STUN timeout, so the server frees the session while the
+// hook runs, and then refuses the publisher.
+class MockHttpHooksForSlowRefusal : public MockHttpHooksForOnPublish
+{
+public:
+    MockRtcApiServerForFreedPublish *server_;
+    bool found_before_timeout_;
+    int expires_before_timeout_;
+    bool found_after_timeout_;
+
+public:
+    MockHttpHooksForSlowRefusal(MockRtcApiServerForFreedPublish *server)
+    {
+        server_ = server;
+        found_before_timeout_ = false;
+        expires_before_timeout_ = -1;
+        found_after_timeout_ = true;
+    }
+    virtual ~MockHttpHooksForSlowRefusal()
+    {
+    }
+
+public:
+    virtual srs_error_t on_publish(std::string url, ISrsRequest *req, SrsRtmpConnType type)
+    {
+        found_before_timeout_ = (server_->find_rtc_session_by_username("freed-publisher") != NULL);
+        expires_before_timeout_ = server_->expire_count_;
+
+        server_->stun_timeout();
+        found_after_timeout_ = (server_->find_rtc_session_by_username("freed-publisher") != NULL);
+
+        return MockHttpHooksForOnPublish::on_publish(url, req, type);
+    }
+};
+
+// WHIP: a hook slower than the STUN timeout refuses a publisher whose session is already freed. The
+// refusal still answers 401, and never expires the freed session.
+VOID TEST(HookRejectionTest, WhipRejectedPublisherSessionFreedDuringHook)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<MockRtcApiServerForFreedPublish> server(new MockRtcApiServerForFreedPublish());
+    SrsUniquePtr<MockResponseWriter> writer(new MockResponseWriter());
+    SrsUniquePtr<MockHttpMessageForRtcApi> message(new MockHttpMessageForRtcApi());
+    HELPER_EXPECT_SUCCESS(message->set_url("http://127.0.0.1:1985/rtc/v1/whip/?app=live&stream=livestream", false));
+    message->body_content_ = mock_whip_publish_offer();
+
+    SrsUniquePtr<MockAppConfigForHttpHooksOnPublish> config(new MockAppConfigForHttpHooksOnPublish());
+    config->rtc_server_enabled_ = true;
+    config->rtc_enabled_ = true;
+    config->http_hooks_enabled_ = true;
+    config->on_publish_directive_ = new SrsConfDirective();
+    config->on_publish_directive_->name_ = "on_publish";
+    config->on_publish_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/publish");
+
+    SrsUniquePtr<MockHttpHooksForSlowRefusal> hooks(new MockHttpHooksForSlowRefusal(server.get()));
+    hooks->on_publish_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsUniquePtr<SrsGoApiRtcWhip> api(new SrsGoApiRtcWhip(server.get()));
+    api->config_ = config.get();
+    api->publish_->config_ = config.get();
+    api->publish_->hooks_ = hooks.get();
+
+    // No session before the publisher asks.
+    EXPECT_EQ(0, server->create_count_);
+    EXPECT_TRUE(server->session_ == NULL);
+
+    HELPER_EXPECT_SUCCESS(api->serve_http(writer.get(), message.get()));
+
+    // The session was made before the hook, alive and not expired when the hook started, and freed
+    // by the STUN timeout while the hook ran.
+    EXPECT_EQ(1, server->create_count_);
+    EXPECT_EQ(1, hooks->on_publish_count_);
+    EXPECT_TRUE(hooks->found_before_timeout_);
+    EXPECT_EQ(0, hooks->expires_before_timeout_);
+    EXPECT_FALSE(hooks->found_after_timeout_);
+
+    // The publisher is refused as unauthorized, and the freed session is never expired again.
+    string response(writer->io.out_buffer.bytes(), writer->io.out_buffer.length());
+    EXPECT_EQ(0, (int)response.find("HTTP/1.1 401"));
+    EXPECT_TRUE(server->session_ == NULL);
+    EXPECT_EQ(0, server->expire_count_);
+
+    api->config_ = NULL;
+    api->publish_->config_ = NULL;
+    api->publish_->hooks_ = NULL;
+}
+
+// SRT: rejection with no reason is the accepted, final behavior.
+//
+// MPEG-TS over SRT carries no application-level status or response channel, so there is nothing to
+// deliver a rejection reason through. The only guarantee SRS can offer is that the playback is
+// refused and the session ends. This test locks that limitation in; unlike the other protocols it
+// is expected to PASS today and to keep passing after the enhancement.
+VOID TEST(HookRejectionTest, SrtRejectedViewerIsRefusedWithoutStatusChannel)
+{
+    srs_error_t err = srs_success;
+
+    srs_srt_t dummy_fd = 1;
+    SrsUniquePtr<SrsMpegtsSrtConn> conn(new SrsMpegtsSrtConn(NULL, dummy_fd, "192.168.1.100", 9000));
+    conn->assemble();
+
+    // Enable the on_play hook for this vhost.
+    SrsUniquePtr<MockAppConfigForSrtHooks> config(new MockAppConfigForSrtHooks());
+    config->set_http_hooks_enabled(true);
+    vector<string> urls;
+    urls.push_back("http://127.0.0.1:8085/api/v1/play");
+    config->set_on_play_urls(urls);
+
+    // The hook rejects this viewer as unauthorized.
+    SrsUniquePtr<MockHttpHooksForSrt> hooks(new MockHttpHooksForSrt());
+    hooks->on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response object code %d", MOCK_HOOK_REJECT_STATUS);
+
+    SrsUniquePtr<MockRtcAsyncCallRequest> request(new MockRtcAsyncCallRequest("test.vhost", "live", "stream1"));
+
+    conn->config_ = config.get();
+    conn->hooks_ = hooks.get();
+    conn->req_ = request.get();
+
+    // GOAL: the playback is refused. SRT exposes no status channel, so the rejection reason is
+    // deliberately not delivered to the player and the session simply ends.
+    HELPER_EXPECT_FAILED(conn->http_hooks_on_play());
+    EXPECT_EQ(1, hooks->on_play_count_);
+
+    conn->config_ = NULL;
+    conn->hooks_ = NULL;
+    conn->req_ = NULL;
+    conn->stat_ = NULL;
+    conn->stream_publish_tokens_ = NULL;
+    conn->srt_sources_ = NULL;
+    conn->live_sources_ = NULL;
+    conn->rtc_sources_ = NULL;
+}
+
+// Stands in for the other coroutines that run while a viewer's on_play hook blocks on its HTTP
+// POST: SrsServer::resample_kbps() casts every connection to SrsRtmpConn and samples its delta,
+// and the HTTP API dumps the clients and streams the viewer was just registered with.
+class MockHttpHooksForIssue4754 : public MockHttpHooksForOnPlay
+{
+public:
+    SrsStatistic *stat_;
+    SrsRtmpConn *conn_;
+    std::string stream_id_;
+    int nb_clients_;
+
+public:
+    MockHttpHooksForIssue4754(SrsStatistic *stat)
+    {
+        stat_ = stat;
+        conn_ = NULL;
+        nb_clients_ = 0;
+    }
+
+public:
+    virtual srs_error_t on_play(std::string url, ISrsRequest *req, SrsRtmpConnType type)
+    {
+        SrsRtmpConn *rtmp = dynamic_cast<SrsRtmpConn *>((ISrsResource *)conn_);
+        if (rtmp) {
+            stat_->kbps_add_delta(rtmp->get_id().c_str(), rtmp->delta());
+        }
+
+        SrsUniquePtr<SrsJsonArray> clients(SrsJsonAny::array());
+        srs_error_t err = stat_->dumps_clients(clients.get(), 0, 10);
+        srs_freep(err);
+        SrsUniquePtr<SrsJsonArray> streams(SrsJsonAny::array());
+        err = stat_->dumps_streams(streams.get(), 0, 10);
+        srs_freep(err);
+
+        SrsStatisticStream *stream = stat_->find_stream_by_url(req->get_stream_url());
+        if (stream) {
+            stream_id_ = stream->id_;
+            nb_clients_ = stream->nb_clients_;
+        }
+
+        return MockHttpHooksForOnPlay::on_play(url, req, type);
+    }
+};
+
+// Issue #4754: an on_play hook that denies RTMP viewers was reported to crash SRS with SIGSEGV,
+// blamed on an uninitialized SrsRtmpConn::consumer_ read while the hook blocks. Replay the
+// reported log: many viewers of one stream, each registered with the statistic, inspected by
+// the concurrent work above during the hook, denied, then cleaned up exactly as cycle() does.
+VOID TEST(ReproduceIssue4754, DeniedRtmpViewersDoNotCrash)
+{
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+
+    MockAppConfigForHttpHooksOnPlay *config = new MockAppConfigForHttpHooksOnPlay();
+    config->default_vhost_ = new SrsConfDirective();
+    config->default_vhost_->name_ = "vhost";
+    config->default_vhost_->args_.push_back("__defaultVhost__");
+    config->http_hooks_enabled_ = true;
+    config->on_play_directive_ = new SrsConfDirective();
+    config->on_play_directive_->name_ = "on_play";
+    config->on_play_directive_->args_.push_back("http://127.0.0.1:3000/api/access_session");
+
+    // The reporter's hook answers 1, which SRS treats as a denial.
+    SrsUniquePtr<MockHttpHooksForIssue4754> hooks(new MockHttpHooksForIssue4754(stat.get()));
+    hooks->on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response number code 1");
+
+    std::set<std::string> stream_ids;
+    for (int i = 0; i < 16; i++) {
+        MockRtmpServer *rtmp = new MockRtmpServer();
+        SrsRtmpConn *conn = new SrsRtmpConn(new MockRtmpTransportForDoCycle(), "192.168.1.22", 1935);
+        conn->config_ = config;
+        conn->assemble();
+
+        srs_freep(conn->rtmp_);
+        conn->rtmp_ = rtmp;
+        srs_freep(conn->security_);
+        conn->security_ = new MockSecurity();
+        conn->hooks_ = hooks.get();
+        conn->stat_ = stat.get();
+        hooks->conn_ = conn;
+
+        rtmp->type_ = SrsRtmpConnPlay;
+        rtmp->stream_ = "issue4754";
+        conn->info_->type_ = SrsRtmpConnPlay;
+        conn->info_->req_->tcUrl_ = "rtmp://192.168.1.100:1935/Live_Now";
+        conn->info_->req_->vhost_ = "__defaultVhost__";
+        conn->info_->req_->app_ = "Live_Now";
+        conn->info_->req_->stream_ = "issue4754";
+
+        srs_error_t err = conn->stream_service_cycle();
+        EXPECT_EQ(ERROR_RESPONSE_CODE, srs_error_code(err));
+        EXPECT_EQ(0, rtmp->start_play_count_);
+
+        // The viewer was registered before the hook, as the reported request body shows.
+        EXPECT_EQ(1, hooks->nb_clients_);
+        stream_ids.insert(hooks->stream_id_);
+
+        // What SrsRtmpConn::cycle() does after do_cycle() returns, then the manager frees it.
+        stat->kbps_add_delta(conn->get_id().c_str(), conn->delta());
+        stat->on_disconnect(conn->get_id().c_str(), err);
+        srs_freep(err);
+
+        conn->hooks_ = NULL;
+        conn->stat_ = NULL;
+        hooks->conn_ = NULL;
+        srs_freep(conn);
+    }
+
+    // As in the reported log, each denied viewer got a fresh statistic stream, and nothing leaks.
+    EXPECT_EQ(16, (int)hooks->on_play_count_);
+    EXPECT_EQ(16, (int)stream_ids.size());
+    EXPECT_TRUE(stat->find_stream_by_url("/Live_Now/issue4754") == NULL);
+    EXPECT_EQ(0, (int)stat->clients_.size());
+    EXPECT_EQ(0, (int)stat->streams_.size());
+
+    srs_freep(config);
+}
+
+// The stats add a client once, however often it is added to its stream: a WebRTC player is added
+// before its on_play hook, then again when its session makes its player.
+VOID TEST(HookOnPlayClientsTest, StatCountsClientAddedAgainOnce)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+    SrsUniquePtr<SrsRequest> req(new SrsRequest());
+    req->vhost_ = "__defaultVhost__";
+    req->app_ = "live";
+    req->stream_ = "livestream";
+
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", req.get(), NULL, SrsRtcConnPlay));
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", req.get(), NULL, SrsRtcConnPlay));
+
+    SrsStatisticStream *stream = stat->find_stream_by_url(req->get_stream_url());
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(1, stream->nb_clients_);
+    EXPECT_EQ(1, stream->vhost_->nb_clients_);
+    EXPECT_EQ(1, (int)stat->nb_clients_);
+
+    // One disconnect removes it, and the stream with it.
+    stat->on_disconnect("player", srs_success);
+    EXPECT_TRUE(stat->find_stream_by_url(req->get_stream_url()) == NULL);
+    EXPECT_EQ(0, (int)stat->clients_.size());
+}
+
+// A client added again to another stream moves to it: the old stream loses it and the new one
+// counts it, so its one disconnect leaves each stream at its old count and frees both.
+VOID TEST(HookOnPlayClientsTest, StatMovesClientAddedToAnotherStream)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+    SrsUniquePtr<SrsRequest> a(new SrsRequest());
+    a->vhost_ = "__defaultVhost__";
+    a->app_ = "live";
+    a->stream_ = "a";
+    SrsUniquePtr<ISrsRequest> b(a->copy());
+    b->stream_ = "b";
+
+    // Another player holds stream a.
+    HELPER_EXPECT_SUCCESS(stat->on_client("other", a.get(), NULL, SrsRtspConnPlay));
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", a.get(), NULL, SrsRtspConnPlay));
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", b.get(), NULL, SrsRtspConnPlay));
+
+    SrsStatisticStream *sa = stat->find_stream_by_url(a->get_stream_url());
+    SrsStatisticStream *sb = stat->find_stream_by_url(b->get_stream_url());
+    ASSERT_TRUE(sa != NULL);
+    ASSERT_TRUE(sb != NULL);
+    EXPECT_EQ(1, sa->nb_clients_);
+    EXPECT_EQ(1, sb->nb_clients_);
+    EXPECT_EQ(2, sa->vhost_->nb_clients_);
+    EXPECT_EQ(2, (int)stat->nb_clients_);
+    EXPECT_TRUE(stat->find_client("player")->stream_ == sb);
+
+    // The player leaves: stream b is freed, stream a keeps the other player.
+    stat->on_disconnect("player", srs_success);
+    EXPECT_TRUE(stat->find_stream_by_url(b->get_stream_url()) == NULL);
+    sa = stat->find_stream_by_url(a->get_stream_url());
+    ASSERT_TRUE(sa != NULL);
+    EXPECT_EQ(1, sa->nb_clients_);
+    EXPECT_EQ(1, sa->vhost_->nb_clients_);
+
+    stat->on_disconnect("other", srs_success);
+    EXPECT_TRUE(stat->find_stream_by_url(a->get_stream_url()) == NULL);
+    EXPECT_EQ(0, stat->find_vhost_by_name("__defaultVhost__")->nb_clients_);
+    EXPECT_EQ(0, (int)stat->clients_.size());
+}
+
+// A client moved off a stream it held alone frees that stream at once, and a move to another
+// vhost moves the vhost's count too.
+VOID TEST(HookOnPlayClientsTest, StatMoveFreesTheEmptyOldStream)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+    SrsUniquePtr<SrsRequest> a(new SrsRequest());
+    a->vhost_ = "one.example.com";
+    a->app_ = "live";
+    a->stream_ = "a";
+    SrsUniquePtr<ISrsRequest> b(a->copy());
+    b->vhost_ = "two.example.com";
+    b->stream_ = "b";
+
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", a.get(), NULL, SrsRtspConnPlay));
+    HELPER_EXPECT_SUCCESS(stat->on_client("player", b.get(), NULL, SrsRtspConnPlay));
+
+    EXPECT_TRUE(stat->find_stream_by_url(a->get_stream_url()) == NULL);
+    SrsStatisticStream *sb = stat->find_stream_by_url(b->get_stream_url());
+    ASSERT_TRUE(sb != NULL);
+    EXPECT_EQ(1, sb->nb_clients_);
+    EXPECT_EQ(0, stat->find_vhost_by_name("one.example.com")->nb_clients_);
+    EXPECT_EQ(1, stat->find_vhost_by_name("two.example.com")->nb_clients_);
+    EXPECT_EQ(1, (int)stat->nb_clients_);
+
+    stat->on_disconnect("player", srs_success);
+    EXPECT_TRUE(stat->find_stream_by_url(b->get_stream_url()) == NULL);
+    EXPECT_EQ(0, stat->find_vhost_by_name("two.example.com")->nb_clients_);
+    EXPECT_EQ(0, (int)stat->clients_.size());
+}
+
+// A WebRTC server that makes a player's session as SrsRtcPlayStream::initialize() does: it adds
+// the player to the stats by the id of the coroutine that asks for the session.
+class MockRtcApiServerForPlayClients : public ISrsRtcApiServer
+{
+public:
+    SrsStatistic *stat_;
+    MockRtcConnectionForRefusedPublish session_;
+    int create_count_;
+
+public:
+    MockRtcApiServerForPlayClients(SrsStatistic *stat)
+    {
+        stat_ = stat;
+        create_count_ = 0;
+    }
+    virtual ~MockRtcApiServerForPlayClients()
+    {
+    }
+
+public:
+    virtual srs_error_t create_rtc_session(SrsRtcUserConfig *ruc, SrsSdp &local_sdp, ISrsRtcConnection **psession)
+    {
+        create_count_++;
+        *psession = &session_;
+        return stat_->on_client(_srs_context->get_id().c_str(), ruc->req_, &session_, SrsRtcConnPlay);
+    }
+    virtual ISrsRtcConnection *find_rtc_session_by_username(const std::string &ufrag)
+    {
+        return NULL;
+    }
+};
+
+// The offer of a WHEP player, a raw SDP body that receives Opus and H.264.
+static std::string mock_whep_play_offer()
+{
+    return "v=0\r\n"
+           "o=- 123456 2 IN IP4 127.0.0.1\r\n"
+           "s=-\r\n"
+           "t=0 0\r\n"
+           "a=group:BUNDLE 0 1\r\n"
+           "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+           "c=IN IP4 0.0.0.0\r\n"
+           "a=rtcp-mux\r\n"
+           "a=recvonly\r\n"
+           "a=mid:0\r\n"
+           "a=rtpmap:111 opus/48000/2\r\n"
+           "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+           "c=IN IP4 0.0.0.0\r\n"
+           "a=rtcp-mux\r\n"
+           "a=recvonly\r\n"
+           "a=mid:1\r\n"
+           "a=rtpmap:96 H264/90000\r\n";
+}
+
+// Plays a published stream by WebRTC with the on_play hook on: returns the error of the play, and
+// the hook's stream clients in hooks->nb_clients_.
+static srs_error_t mock_whep_play_with_hook(SrsStatistic *stat, MockRtcApiServerForPlayClients *server,
+                                            MockHttpHooksForIssue4754 *hooks, ISrsRequest *publisher)
+{
+    srs_error_t err = srs_success;
+
+    if ((err = stat->on_client("publisher", publisher, NULL, SrsRtcConnPublish)) != srs_success) {
+        return err;
+    }
+
+    MockAppConfigForRtcPlay config;
+    config.rtc_from_rtmp_ = true;
+    config.http_hooks_enabled_ = true;
+    config.on_play_directive_ = new SrsConfDirective();
+    config.on_play_directive_->name_ = "on_play";
+    config.on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/sessions");
+
+    MockRtcSourceManager rtc_sources;
+    MockLiveSourceManager live_sources;
+
+    SrsUniquePtr<SrsGoApiRtcPlay> api(new SrsGoApiRtcPlay(server));
+    api->config_ = &config;
+    api->stat_ = stat;
+    api->rtc_sources_ = &rtc_sources;
+    api->live_sources_ = &live_sources;
+    api->hooks_ = hooks;
+    srs_freep(api->security_);
+    api->security_ = new MockSecurity();
+
+    SrsUniquePtr<SrsRtcUserConfig> ruc(new SrsRtcUserConfig());
+    ruc->req_->vhost_ = publisher->vhost_;
+    ruc->req_->app_ = publisher->app_;
+    ruc->req_->stream_ = publisher->stream_;
+    ruc->req_->ip_ = "127.0.0.1";
+    ruc->remote_sdp_str_ = mock_whep_play_offer();
+    if ((err = ruc->remote_sdp_.parse(ruc->remote_sdp_str_)) == srs_success) {
+        MockResponseWriter writer;
+        MockHttpMessageForRtcApi message;
+        err = api->serve_http(&writer, &message, ruc.get());
+    }
+
+    api->config_ = NULL;
+    api->stat_ = NULL;
+    api->rtc_sources_ = NULL;
+    api->live_sources_ = NULL;
+    api->hooks_ = NULL;
+    return err;
+}
+
+// WHEP: the on_play of a player counts it in the stream's clients, as an RTMP, HTTP or SRT
+// player's does, and its session counts it no more.
+VOID TEST(HookOnPlayClientsTest, WhepOnPlayCountsPlayer)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+    SrsUniquePtr<MockRtcApiServerForPlayClients> server(new MockRtcApiServerForPlayClients(stat.get()));
+    SrsUniquePtr<MockHttpHooksForIssue4754> hooks(new MockHttpHooksForIssue4754(stat.get()));
+    SrsUniquePtr<SrsRequest> publisher(new SrsRequest());
+    publisher->vhost_ = "__defaultVhost__";
+    publisher->app_ = "live";
+    publisher->stream_ = "livestream";
+
+    HELPER_EXPECT_SUCCESS(mock_whep_play_with_hook(stat.get(), server.get(), hooks.get(), publisher.get()));
+
+    EXPECT_EQ(1, hooks->on_play_count_);
+    EXPECT_EQ(2, hooks->nb_clients_);
+    EXPECT_EQ(1, server->create_count_);
+
+    SrsStatisticStream *stream = stat->find_stream_by_url(publisher->get_stream_url());
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(hooks->stream_id_, stream->id_);
+    EXPECT_EQ(2, stream->nb_clients_);
+    EXPECT_EQ(2, (int)stat->clients_.size());
+}
+
+// WHEP: a player the hook refuses is counted while the hook decides, then leaves the stats, for
+// it gets no session.
+VOID TEST(HookOnPlayClientsTest, WhepRefusedPlayerLeavesStats)
+{
+    srs_error_t err = srs_success;
+
+    SrsUniquePtr<SrsStatistic> stat(new SrsStatistic());
+    SrsUniquePtr<MockRtcApiServerForPlayClients> server(new MockRtcApiServerForPlayClients(stat.get()));
+    SrsUniquePtr<MockHttpHooksForIssue4754> hooks(new MockHttpHooksForIssue4754(stat.get()));
+    hooks->on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response number code 1");
+    SrsUniquePtr<SrsRequest> publisher(new SrsRequest());
+    publisher->vhost_ = "__defaultVhost__";
+    publisher->app_ = "live";
+    publisher->stream_ = "livestream";
+
+    HELPER_EXPECT_FAILED(mock_whep_play_with_hook(stat.get(), server.get(), hooks.get(), publisher.get()));
+
+    EXPECT_EQ(1, hooks->on_play_count_);
+    EXPECT_EQ(2, hooks->nb_clients_);
+    EXPECT_EQ(0, server->create_count_);
+
+    SrsStatisticStream *stream = stat->find_stream_by_url(publisher->get_stream_url());
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(1, stream->nb_clients_);
+    EXPECT_EQ(1, (int)stat->clients_.size());
+}
+
+#ifdef SRS_RTSP
+// An RTSP connection, with its own stats, whose stream has a publisher, for the life of the RTSP
+// client in the stats: it joins when its on_play passes at DESCRIBE, and leaves at TEARDOWN, when
+// the connection ends, or when the on_play hook refuses it.
+class RtspClientLifetimeFixture
+{
+public:
+    SrsStatistic stat_;
+    MockHttpHooksForIssue4754 hooks_;
+    MockAppConfigForHttpHooksOnPlay config_;
+    MockSecurity security_;
+    MockRtspSourceManager sources_;
+    SrsRequest publisher_;
+    SrsRtspConnection *conn_;
+
+public:
+    RtspClientLifetimeFixture() : hooks_(&stat_)
+    {
+        conn_ = new SrsRtspConnection(NULL, NULL, "127.0.0.1", 8554);
+        publisher_.vhost_ = "__defaultVhost__";
+        publisher_.app_ = "live";
+        publisher_.stream_ = "livestream";
+        srs_error_t err = stat_.on_client("publisher", &publisher_, NULL, SrsRtcConnPublish);
+        srs_assert(err == srs_success);
+
+        config_.default_vhost_ = new SrsConfDirective();
+        config_.default_vhost_->name_ = "vhost";
+        config_.default_vhost_->args_.push_back("__defaultVhost__");
+        config_.http_hooks_enabled_ = true;
+        config_.on_play_directive_ = new SrsConfDirective();
+        config_.on_play_directive_->name_ = "on_play";
+        config_.on_play_directive_->args_.push_back("http://127.0.0.1:8085/api/v1/sessions");
+
+        SrsSharedPtr<SrsRtspSource> source(new SrsRtspSource());
+        SrsRtcTrackDescription *video = new SrsRtcTrackDescription();
+        video->type_ = "video";
+        video->ssrc_ = 2001;
+        video->media_ = new SrsVideoPayload(96, "H264", 90000);
+        source->video_desc_ = video;
+        sources_.mock_source_ = source;
+
+        conn_->cid_.set_value("rtsp-client");
+        conn_->config_ = &config_;
+        conn_->security_ = &security_;
+        conn_->hooks_ = &hooks_;
+        conn_->stat_ = &stat_;
+        conn_->rtsp_sources_ = &sources_;
+    }
+    ~RtspClientLifetimeFixture()
+    {
+        conn_->config_ = NULL;
+        conn_->security_ = NULL;
+        conn_->hooks_ = NULL;
+        conn_->rtsp_sources_ = NULL;
+        // The connection frees its player, which leaves the stats, so free it while they live.
+        srs_freep(conn_);
+    }
+
+public:
+    srs_error_t describe(std::string stream)
+    {
+        SrsUniquePtr<SrsRtspRequest> req(new SrsRtspRequest());
+        req->uri_ = "rtsp://127.0.0.1:8554/live/" + stream;
+        std::string sdp;
+        return conn_->do_describe(req.get(), sdp);
+    }
+    // What PLAY does to the stats: the player of the connection adds the client by its id.
+    srs_error_t play()
+    {
+        SrsRtspPlayStream *player = new SrsRtspPlayStream(conn_, conn_->cid_);
+        player->stat_ = &stat_;
+        player->rtsp_sources_ = &sources_;
+        conn_->player_ = player;
+        return player->initialize(conn_->request_, std::map<uint32_t, SrsRtcTrackDescription *>());
+    }
+    SrsStatisticStream *stream(std::string name)
+    {
+        return stat_.find_stream_by_url("/live/" + name);
+    }
+    SrsStatisticClient *client()
+    {
+        return stat_.find_client("rtsp-client");
+    }
+};
+
+// RTSP: the on_play at DESCRIBE counts the player in the stream's clients, as an RTMP, HTTP or SRT
+// player's does, and the client stays in the stats after the hook: its connection is open and
+// about to PLAY, so the API lists it and the stream counts it.
+VOID TEST(HookOnPlayClientsTest, RtspOnPlayCountsPlayer)
+{
+    srs_error_t err = srs_success;
+
+    RtspClientLifetimeFixture f;
+    HELPER_EXPECT_SUCCESS(f.describe("livestream"));
+
+    EXPECT_EQ(1, f.hooks_.on_play_count_);
+    EXPECT_EQ(2, f.hooks_.nb_clients_);
+
+    SrsStatisticStream *stream = f.stream("livestream");
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(f.hooks_.stream_id_, stream->id_);
+    EXPECT_EQ(2, stream->nb_clients_);
+    EXPECT_EQ(2, (int)f.stat_.clients_.size());
+
+    SrsStatisticClient *client = f.client();
+    ASSERT_TRUE(client != NULL);
+    EXPECT_EQ(SrsRtspConnPlay, client->type_);
+    EXPECT_EQ(stream, client->stream_);
+}
+
+// RTSP: a player the hook refuses at DESCRIBE is counted while the hook decides, then leaves the
+// stats, for it will not play.
+VOID TEST(HookOnPlayClientsTest, RtspRefusedPlayerLeavesStats)
+{
+    srs_error_t err = srs_success;
+
+    RtspClientLifetimeFixture f;
+    f.hooks_.on_play_error_ = srs_error_new(ERROR_RESPONSE_CODE, "http: response number code 1");
+
+    err = f.describe("livestream");
+    EXPECT_EQ(ERROR_SYSTEM_AUTH, srs_error_code(err));
+    srs_freep(err);
+
+    EXPECT_EQ(1, f.hooks_.on_play_count_);
+    EXPECT_EQ(2, f.hooks_.nb_clients_);
+
+    SrsStatisticStream *stream = f.stream("livestream");
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(1, stream->nb_clients_);
+    EXPECT_EQ(1, (int)f.stat_.clients_.size());
+    EXPECT_TRUE(f.client() == NULL);
+}
+
+// RTSP: PLAY makes the player of a client DESCRIBE added, the same client by its id, so the stream
+// counts it once, and the client is the player's; TEARDOWN removes it.
+VOID TEST(HookOnPlayClientsTest, RtspPlayCountsDescribedClientOnce)
+{
+    srs_error_t err = srs_success;
+
+    RtspClientLifetimeFixture f;
+    HELPER_EXPECT_SUCCESS(f.describe("livestream"));
+    HELPER_EXPECT_SUCCESS(f.play());
+
+    SrsStatisticStream *stream = f.stream("livestream");
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(2, stream->nb_clients_);
+    EXPECT_EQ(2, (int)f.stat_.clients_.size());
+    ASSERT_TRUE(f.client() != NULL);
+    EXPECT_EQ(SrsRtspConnPlay, f.client()->type_);
+
+    HELPER_EXPECT_SUCCESS(f.conn_->do_teardown());
+    EXPECT_EQ(1, stream->nb_clients_);
+    EXPECT_EQ(1, (int)f.stat_.clients_.size());
+    EXPECT_TRUE(f.client() == NULL);
+}
+
+// RTSP: a client that DESCRIBEs but never PLAYs leaves the stats when its connection ends, as
+// cycle() tears it down.
+VOID TEST(HookOnPlayClientsTest, RtspDescribedClientLeavesAtClose)
+{
+    srs_error_t err = srs_success;
+
+    RtspClientLifetimeFixture f;
+    HELPER_EXPECT_SUCCESS(f.describe("livestream"));
+    ASSERT_TRUE(f.client() != NULL);
+
+    HELPER_EXPECT_SUCCESS(f.conn_->do_teardown());
+
+    SrsStatisticStream *stream = f.stream("livestream");
+    ASSERT_TRUE(stream != NULL);
+    EXPECT_EQ(1, stream->nb_clients_);
+    EXPECT_EQ(1, (int)f.stat_.clients_.size());
+    EXPECT_TRUE(f.client() == NULL);
+}
+
+// RTSP: a second DESCRIBE, of another stream and with no PLAY between, moves the client: the
+// first stream no longer counts it, and the second one counts it once.
+VOID TEST(HookOnPlayClientsTest, RtspDescribeAgainMovesClient)
+{
+    srs_error_t err = srs_success;
+
+    RtspClientLifetimeFixture f;
+    HELPER_EXPECT_SUCCESS(f.describe("livestream"));
+    HELPER_EXPECT_SUCCESS(f.describe("stream2"));
+
+    EXPECT_EQ(2, f.hooks_.on_play_count_);
+    EXPECT_EQ(1, f.hooks_.nb_clients_);
+
+    SrsStatisticStream *first = f.stream("livestream");
+    ASSERT_TRUE(first != NULL);
+    EXPECT_EQ(1, first->nb_clients_);
+
+    SrsStatisticStream *second = f.stream("stream2");
+    ASSERT_TRUE(second != NULL);
+    EXPECT_EQ(1, second->nb_clients_);
+    EXPECT_EQ(2, (int)f.stat_.clients_.size());
+    ASSERT_TRUE(f.client() != NULL);
+    EXPECT_EQ(second, f.client()->stream_);
+
+    HELPER_EXPECT_SUCCESS(f.conn_->do_teardown());
+    EXPECT_EQ(1, (int)f.stat_.clients_.size());
+}
+#endif
+
+// The stat of the frames an RTMP publisher reports.
+class MockAppStatisticForFrames : public MockAppStatistic
+{
+public:
+    int video_frames_;
+    int audio_frames_;
+
+public:
+    MockAppStatisticForFrames()
+    {
+        video_frames_ = 0;
+        audio_frames_ = 0;
+    }
+
+public:
+    virtual srs_error_t on_video_frames(ISrsRequest *req, int nb_frames)
+    {
+        video_frames_ += nb_frames;
+        return srs_success;
+    }
+    virtual srs_error_t on_audio_frames(ISrsRequest *req, int nb_frames)
+    {
+        audio_frames_ += nb_frames;
+        return srs_success;
+    }
+};
+
+// Feed an RTMP publisher an AAC raw frame, or an H.264 keyframe.
+static void mock_rtmp_publish_frame(MockRtmpServer *rtmp, bool is_audio)
+{
+    int payload_size = 10;
+    SrsRtmpCommonMessage *msg = new SrsRtmpCommonMessage();
+    if (is_audio) {
+        msg->header_.initialize_audio(payload_size, 0, 1);
+    } else {
+        msg->header_.initialize_video(payload_size, 0, 1);
+    }
+    msg->create_payload(payload_size);
+
+    SrsBuffer stream(msg->payload(), payload_size);
+    if (is_audio) {
+        stream.write_1bytes(0xAF);
+        stream.write_1bytes(0x01);
+    } else {
+        stream.write_1bytes(0x17);
+        stream.write_1bytes(0x01);
+        stream.write_3bytes(0x000000);
+    }
+    while (!stream.empty()) {
+        stream.write_1bytes(0x00);
+    }
+
+    rtmp->recv_msgs_.push_back(msg);
+    rtmp->cond_->signal();
+}
+
+// An RTMP publisher's frames are reported to the stream stats at its first
+// message, not at the first-packet timeout of 20s; then at most once a second,
+// so the frames that follow within the second wait for the next report.
+VOID TEST(RtmpPublishFrameStatsTest, FirstFramesReportedAtOnce)
+{
+    srs_error_t err;
+
+    SrsUniquePtr<MockAppConfig> mock_config(new MockAppConfig());
+    SrsUniquePtr<MockConnectionManager> mock_manager(new MockConnectionManager());
+    SrsUniquePtr<MockLiveSourceManager> mock_sources(new MockLiveSourceManager());
+    SrsUniquePtr<MockStreamPublishTokenManager> mock_tokens(new MockStreamPublishTokenManager());
+    SrsUniquePtr<MockAppStatisticForFrames> mock_stat(new MockAppStatisticForFrames());
+    SrsUniquePtr<MockHttpHooks> mock_hooks(new MockHttpHooks());
+    SrsUniquePtr<MockRtcSourceManager> mock_rtc_sources(new MockRtcSourceManager());
+    SrsUniquePtr<MockSrtSourceManager> mock_srt_sources(new MockSrtSourceManager());
+#ifdef SRS_RTSP
+    SrsUniquePtr<MockRtspSourceManager> mock_rtsp_sources(new MockRtspSourceManager());
+#endif
+    MockRtmpServer *mock_rtmp_server = new MockRtmpServer();
+    MockSecurity *mock_security = new MockSecurity();
+
+    mock_config->default_vhost_ = new SrsConfDirective();
+    mock_config->default_vhost_->name_ = "vhost";
+    mock_config->default_vhost_->args_.push_back("__defaultVhost__");
+    mock_config->mw_msgs_ = 0;
+    mock_config->mw_sleep_ = 0;
+
+    mock_rtmp_server->set_request(SrsRtmpConnFMLEPublish, "192.168.1.100", "utest.ossrs.io", "utest", "livestream", "rtmp://127.0.0.1/utest", "rtmp", 1935, "127.0.0.1");
+
+    ISrsRtmpTransport *transport = new MockRtmpTransport();
+    SrsUniquePtr<SrsRtmpConn> conn(new SrsRtmpConn(transport, "192.168.1.100", 1935));
+
+    conn->config_ = mock_config.get();
+    conn->manager_ = mock_manager.get();
+    conn->live_sources_ = mock_sources.get();
+    conn->stream_publish_tokens_ = mock_tokens.get();
+    conn->stat_ = mock_stat.get();
+    conn->hooks_ = mock_hooks.get();
+    conn->rtc_sources_ = mock_rtc_sources.get();
+    conn->srt_sources_ = mock_srt_sources.get();
+#ifdef SRS_RTSP
+    conn->rtsp_sources_ = mock_rtsp_sources.get();
+#endif
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = mock_rtmp_server;
+    srs_freep(conn->security_);
+    conn->security_ = mock_security;
+
+    HELPER_EXPECT_SUCCESS(conn->start());
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+
+    // GOAL: the first frame is in the stream stats at once.
+    mock_rtmp_publish_frame(mock_rtmp_server, true);
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(1, mock_stat->audio_frames_);
+    EXPECT_EQ(0, mock_stat->video_frames_);
+
+    // A frame within the second waits for the next report.
+    mock_rtmp_publish_frame(mock_rtmp_server, false);
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(1, mock_stat->audio_frames_);
+    EXPECT_EQ(0, mock_stat->video_frames_);
+
+    mock_rtmp_server->recv_err_ = srs_error_new(ERROR_SOCKET_READ, "mock client quit");
+    mock_rtmp_server->cond_->signal();
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+
+    conn->stop();
+}
+
+// The publish timeouts of an RTMP publisher.
+class MockAppConfigForPublishTimeout : public MockAppConfig
+{
+public:
+    srs_utime_t publish_1stpkt_timeout_;
+    srs_utime_t publish_normal_timeout_;
+
+public:
+    MockAppConfigForPublishTimeout()
+    {
+        publish_1stpkt_timeout_ = 200 * SRS_UTIME_MILLISECONDS;
+        publish_normal_timeout_ = 400 * SRS_UTIME_MILLISECONDS;
+    }
+
+public:
+    virtual srs_utime_t get_publish_1stpkt_timeout(std::string vhost) { return publish_1stpkt_timeout_; }
+    virtual srs_utime_t get_publish_normal_timeout(std::string vhost) { return publish_normal_timeout_; }
+};
+
+// The frames an RTMP publisher reports, and the error it ends with.
+class MockAppStatisticForPublishTimeout : public MockAppStatisticForFrames
+{
+public:
+    int disconnect_code_;
+
+public:
+    MockAppStatisticForPublishTimeout()
+    {
+        disconnect_code_ = ERROR_SUCCESS;
+    }
+
+public:
+    virtual void on_disconnect(std::string id, srs_error_t err)
+    {
+        MockAppStatisticForFrames::on_disconnect(id, err);
+        disconnect_code_ = srs_error_code(err);
+    }
+};
+
+// An RTMP publisher is checked once per wait: the first wait is the first-packet timeout of 200ms,
+// each later one the normal timeout of 400ms, from the end of the last. A burst at the start, then
+// a pause of 500ms, ends in the window from 200ms to 600ms, so the publisher is kept: its messages
+// don't restart the window. The frames are reported at the first message and at each check.
+VOID TEST(RtmpPublishFrameStatsTest, PauseAfterBurstKeepsPublisher)
+{
+    srs_error_t err;
+
+    SrsUniquePtr<MockAppConfigForPublishTimeout> mock_config(new MockAppConfigForPublishTimeout());
+    SrsUniquePtr<MockConnectionManager> mock_manager(new MockConnectionManager());
+    SrsUniquePtr<MockLiveSourceManager> mock_sources(new MockLiveSourceManager());
+    SrsUniquePtr<MockStreamPublishTokenManager> mock_tokens(new MockStreamPublishTokenManager());
+    SrsUniquePtr<MockAppStatisticForPublishTimeout> mock_stat(new MockAppStatisticForPublishTimeout());
+    SrsUniquePtr<MockHttpHooks> mock_hooks(new MockHttpHooks());
+    SrsUniquePtr<MockRtcSourceManager> mock_rtc_sources(new MockRtcSourceManager());
+    SrsUniquePtr<MockSrtSourceManager> mock_srt_sources(new MockSrtSourceManager());
+#ifdef SRS_RTSP
+    SrsUniquePtr<MockRtspSourceManager> mock_rtsp_sources(new MockRtspSourceManager());
+#endif
+    MockRtmpServer *mock_rtmp_server = new MockRtmpServer();
+    MockSecurity *mock_security = new MockSecurity();
+
+    mock_config->default_vhost_ = new SrsConfDirective();
+    mock_config->default_vhost_->name_ = "vhost";
+    mock_config->default_vhost_->args_.push_back("__defaultVhost__");
+    mock_config->mw_msgs_ = 0;
+    mock_config->mw_sleep_ = 0;
+
+    mock_rtmp_server->set_request(SrsRtmpConnFMLEPublish, "192.168.1.100", "utest.ossrs.io", "utest", "livestream", "rtmp://127.0.0.1/utest", "rtmp", 1935, "127.0.0.1");
+
+    ISrsRtmpTransport *transport = new MockRtmpTransport();
+    SrsUniquePtr<SrsRtmpConn> conn(new SrsRtmpConn(transport, "192.168.1.100", 1935));
+
+    conn->config_ = mock_config.get();
+    conn->manager_ = mock_manager.get();
+    conn->live_sources_ = mock_sources.get();
+    conn->stream_publish_tokens_ = mock_tokens.get();
+    conn->stat_ = mock_stat.get();
+    conn->hooks_ = mock_hooks.get();
+    conn->rtc_sources_ = mock_rtc_sources.get();
+    conn->srt_sources_ = mock_srt_sources.get();
+#ifdef SRS_RTSP
+    conn->rtsp_sources_ = mock_rtsp_sources.get();
+#endif
+    conn->assemble();
+
+    srs_freep(conn->rtmp_);
+    conn->rtmp_ = mock_rtmp_server;
+    srs_freep(conn->security_);
+    conn->security_ = mock_security;
+
+    HELPER_EXPECT_SUCCESS(conn->start());
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(0, mock_stat->on_disconnect_count_);
+
+    // The burst at the start: the first frame is reported at once, the others at the first check.
+    mock_rtmp_publish_frame(mock_rtmp_server, true);
+    mock_rtmp_publish_frame(mock_rtmp_server, false);
+    mock_rtmp_publish_frame(mock_rtmp_server, true);
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(0, mock_stat->on_disconnect_count_);
+    EXPECT_EQ(1, mock_stat->audio_frames_);
+    EXPECT_EQ(0, mock_stat->video_frames_);
+
+    // GOAL: at 500ms, past the normal timeout after the burst, the publisher is kept, and the first
+    // check at 200ms reported the burst.
+    srs_usleep(500 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(0, mock_stat->on_disconnect_count_);
+    EXPECT_EQ(2, mock_stat->audio_frames_);
+    EXPECT_EQ(1, mock_stat->video_frames_);
+
+    // The frames after the pause, within the second of the first report, wait for the next check.
+    mock_rtmp_publish_frame(mock_rtmp_server, false);
+    mock_rtmp_publish_frame(mock_rtmp_server, true);
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(0, mock_stat->on_disconnect_count_);
+    EXPECT_EQ(2, mock_stat->audio_frames_);
+    EXPECT_EQ(1, mock_stat->video_frames_);
+
+    // The check at 600ms finds the frames after the pause, keeps the publisher and reports them.
+    srs_usleep(200 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(0, mock_stat->on_disconnect_count_);
+    EXPECT_EQ(3, mock_stat->audio_frames_);
+    EXPECT_EQ(2, mock_stat->video_frames_);
+
+    // The publisher ends when the client quits, not by a timeout.
+    mock_rtmp_server->recv_err_ = srs_error_new(ERROR_SOCKET_READ, "mock client quit");
+    mock_rtmp_server->cond_->signal();
+    srs_usleep(1 * SRS_UTIME_MILLISECONDS);
+    EXPECT_EQ(1, mock_stat->on_disconnect_count_);
+    EXPECT_EQ(ERROR_SOCKET_READ, mock_stat->disconnect_code_);
+    EXPECT_EQ(3, mock_stat->audio_frames_);
+    EXPECT_EQ(2, mock_stat->video_frames_);
+
+    conn->stop();
+}
